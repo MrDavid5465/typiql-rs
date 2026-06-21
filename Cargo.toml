@@ -1,3 +1,3 @@
 [workspace]
-members = ["crates/typiql-macros", "crates/typiql-core"]
+members = ["crates/typiql-macros", "crates/typiql-core", "crates/typiql-adapter-json"]
 resolver = "2"

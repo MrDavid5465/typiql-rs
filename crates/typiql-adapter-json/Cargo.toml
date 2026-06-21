@@ -1,0 +1,18 @@
+[package]
+name = "typiql-adapter-json"
+version = "0.1.0"
+edition = "2021"
+description = "JSON flat-file adapter for typiql — stores each collection as a JSON array on disk"
+license = "MIT"
+keywords = ["graphql", "typiql", "json", "persistence"]
+categories = ["database", "filesystem"]
+
+[dependencies]
+typiql-core = { path = "../typiql-core", version = "0.1" }
+
+async-trait  = "0.1"
+serde        = { version = "1", features = ["derive"] }
+serde_json   = "1"
+parking_lot  = "0.12"
+uuid         = { version = "1", features = ["v4"] }
+tokio        = { version = "1", features = ["fs"] }

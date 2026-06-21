@@ -2,7 +2,7 @@
 name = "typiql-core"
 version = "0.1.0"
 edition = "2021"
-description = "Runtime for the typiql async-graphql CRUD framework — adapter trait, broker, JSON persistence, and axum router"
+description = "Core runtime for the typiql async-graphql CRUD framework — adapter trait, broker, resolvers, and axum router"
 license = "MIT"
 keywords = ["graphql", "async-graphql", "crud", "axum"]
 categories = ["web-programming", "database"]
@@ -14,13 +14,11 @@ async-graphql        = "7"
 async-graphql-axum   = "7"
 axum                 = "0.8"
 async-trait          = "0.1"
-tokio                = { version = "1", features = ["fs", "sync"] }
+tokio                = { version = "1", features = ["sync"] }
 tokio-stream         = { version = "0.1", features = ["sync"] }
 futures-util         = "0.3"
 serde                = { version = "1", features = ["derive"] }
 serde_json           = "1"
-parking_lot          = "0.12"
-uuid                 = { version = "1", features = ["v4"] }
 tower-http           = { version = "0.6", features = ["cors"] }
 tower                = "0.5"
 http                 = "1"

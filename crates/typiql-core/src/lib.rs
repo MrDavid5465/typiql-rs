@@ -1,12 +1,10 @@
 pub mod adapter;
 pub mod broker;
-pub mod json_adapter;
 pub mod resolver;
 pub mod router;
 
 pub use adapter::TypiQLAdapter;
 pub use broker::TypiQLBroker;
-pub use json_adapter::JsonAdapter;
 pub use resolver::{resolve_add, resolve_get, resolve_list, resolve_remove, resolve_update};
 pub use router::typiql_router;
 

@@ -5,7 +5,7 @@ use parking_lot::RwLock;
 use serde_json::Value;
 use async_trait::async_trait;
 use uuid::Uuid;
-use crate::adapter::TypiQLAdapter;
+use typiql_core::TypiQLAdapter;
 
 /// Stores each collection as a JSON array in `<data_dir>/<collection>.json`.
 /// All data is cached in-memory; writes go to disk synchronously on mutation.
