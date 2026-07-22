@@ -10,7 +10,7 @@ categories = ["web-programming", "database"]
 [dependencies]
 typiql-macros = { path = "../typiql-macros", version = "0.1" }
 
-async-graphql        = "7"
+async-graphql        = { version = "7", features = ["dataloader"] }
 async-graphql-axum   = "7"
 axum                 = "0.8"
 async-trait          = "0.1"

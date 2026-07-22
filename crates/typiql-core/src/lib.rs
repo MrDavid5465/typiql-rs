@@ -1,11 +1,13 @@
 pub mod adapter;
 pub mod broker;
+pub mod relation_loader;
 pub mod resolver;
 pub mod router;
 
-pub use adapter::TypiQLAdapter;
+pub use adapter::{FieldFilter, FilterOp, Location, TypiQLAdapter};
 pub use broker::TypiQLBroker;
-pub use resolver::{resolve_add, resolve_get, resolve_list, resolve_remove, resolve_update};
+pub use relation_loader::RelationLoader;
+pub use resolver::{resolve_add, resolve_list, resolve_remove, resolve_update};
 pub use router::typiql_router;
 
 // Re-export the proc-macros so callers only need `typiql` as a dependency.
