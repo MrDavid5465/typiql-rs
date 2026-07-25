@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 description = "JSON flat-file adapter for typiql — stores each collection as a JSON array on disk"
 license = "MIT"
+repository.workspace = true
 keywords = ["graphql", "typiql", "json", "persistence"]
 categories = ["database", "filesystem"]
 

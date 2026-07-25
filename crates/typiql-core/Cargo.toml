@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 description = "Core runtime for the typiql async-graphql CRUD framework — adapter trait, broker, resolvers, and axum router"
 license = "MIT"
+repository.workspace = true
 keywords = ["graphql", "async-graphql", "crud", "axum"]
 categories = ["web-programming", "database"]
 

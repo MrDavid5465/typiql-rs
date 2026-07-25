@@ -1,0 +1,17 @@
+[workspace]
+changelog_update = true
+dependencies_update = true
+git_release_enable = true
+semver_check = true
+
+[[package]]
+name = "typiql-macros"
+
+[[package]]
+name = "typiql-core"
+
+[[package]]
+name = "typiql-adapter-json"
+
+[[package]]
+name = "typiql-adapter-duckdb"

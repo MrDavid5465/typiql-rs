@@ -1,0 +1,38 @@
+name: Publish dry run
+
+# Manual-only, never publishes anything for real.
+#
+# Only `typiql-macros` can be dry-run here: every crate with a `path +
+# version` dependency (typiql-core -> typiql-macros, both adapters ->
+# typiql-core) has that dependency re-resolved against the *real* crates.io
+# registry as soon as it's packaged for verification -- `path` info is
+# stripped from the published manifest by design, and there is no cargo flag
+# that bypasses this (confirmed locally: `cargo publish --dry-run` and plain
+# `cargo package` both fail identically for typiql-core with "no matching
+# package named `typiql-macros` found" until typiql-macros is genuinely live
+# on crates.io).
+#
+# So the real, honest first-publish flow is necessarily staged, not a single
+# batch: dry-run + publish typiql-macros for real first (this workflow gets
+# you the dry-run half) -- only once it's actually live does typiql-core's
+# own dry run become meaningful, and so on down the chain. release-plz's own
+# release job already publishes in this exact dependency order automatically
+# once you merge a release PR; this workflow's only job is letting you
+# preview crates.io's real packaging validation (file list, size, metadata
+# warnings) for the foundational crate before that first real publish ever
+# happens.
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  dry-run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: cargo publish --dry-run (typiql-macros)
+        run: cargo publish --dry-run -p typiql-macros
