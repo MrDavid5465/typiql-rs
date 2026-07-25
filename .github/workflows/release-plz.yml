@@ -27,6 +27,34 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
+      # Cross-repo notification so typiql-tauri can bump its version pins
+      # automatically (see typiql-tauri's bump-typiql-rs-deps.yml). Runs
+      # unconditionally on success even if this particular push published
+      # nothing new — it just reports crates.io's current max_version for
+      # each crate typiql-tauri depends on, and the receiving workflow
+      # only opens a PR if that's actually different from what's pinned.
+      # Needs TYPIQL_TAURI_DISPATCH_TOKEN: a PAT (fine-grained, scoped to
+      # the typiql-tauri repo, Contents: Read and write) the user creates
+      # and adds as a secret on this repo — GITHUB_TOKEN can't dispatch
+      # to a different repo.
+      - name: Notify typiql-tauri of current published versions
+        if: success()
+        env:
+          GH_TOKEN: ${{ secrets.TYPIQL_TAURI_DISPATCH_TOKEN }}
+        run: |
+          crate_version() {
+            curl -sf -H "User-Agent: typiql-rs-ci (david@davidallanscott.ca)" \
+              "https://crates.io/api/v1/crates/$1" | jq -r '.crate.max_version'
+          }
+          core="$(crate_version typiql-core)"
+          json_adapter="$(crate_version typiql-adapter-json)"
+          duckdb_adapter="$(crate_version typiql-adapter-duckdb)"
+          gh api repos/MrDavid5465/typiql-tauri/dispatches \
+            -f event_type=typiql-rs-published \
+            -F "client_payload[typiql_core]=$core" \
+            -F "client_payload[typiql_adapter_json]=$json_adapter" \
+            -F "client_payload[typiql_adapter_duckdb]=$duckdb_adapter"
+
   release-plz-pr:
     name: Release-plz PR
     runs-on: ubuntu-latest
