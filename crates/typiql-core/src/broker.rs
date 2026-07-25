@@ -42,7 +42,6 @@ impl<T: Clone + Send + Sync + 'static> TypiQLBroker<T> {
     /// Subscribe to change events. Missed events (when the buffer is full)
     /// are silently dropped via `filter_map`.
     pub fn subscribe() -> impl futures_util::Stream<Item = T> + Send + 'static {
-        BroadcastStream::new(Self::sender().subscribe())
-            .filter_map(|r| r.ok())
+        BroadcastStream::new(Self::sender().subscribe()).filter_map(|r| r.ok())
     }
 }

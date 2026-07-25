@@ -1,11 +1,11 @@
+use crate::adapter::{FieldFilter, FilterOp, TypiQLAdapter};
+use crate::TypiQLType;
+use async_graphql::dataloader::Loader;
+use serde::de::DeserializeOwned;
 use std::collections::HashMap;
 use std::future::Future;
 use std::marker::PhantomData;
 use std::sync::Arc;
-use async_graphql::dataloader::Loader;
-use serde::de::DeserializeOwned;
-use crate::adapter::{FieldFilter, FilterOp, TypiQLAdapter};
-use crate::TypiQLType;
 
 /// Generic DataLoader-compatible batch loader for any relation target type.
 /// The key is the composite set of (foreign_field, stringified_value) pairs
@@ -19,7 +19,10 @@ pub struct RelationLoader<T> {
 
 impl<T> RelationLoader<T> {
     pub fn new(adapter: Arc<dyn TypiQLAdapter>) -> Self {
-        Self { adapter, _marker: PhantomData }
+        Self {
+            adapter,
+            _marker: PhantomData,
+        }
     }
 }
 

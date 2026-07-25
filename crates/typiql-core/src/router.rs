@@ -2,12 +2,12 @@ use std::convert::Infallible;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
-use async_graphql::{Executor, ObjectType, SubscriptionType};
 use async_graphql::http::{
     create_multipart_mixed_stream, is_accept_multipart_mixed, playground_source,
     GraphQLPlaygroundConfig,
 };
-use async_graphql_axum::{GraphQLBatchRequest, GraphQLRequest, rejection::GraphQLRejection};
+use async_graphql::{Executor, ObjectType, SubscriptionType};
+use async_graphql_axum::{rejection::GraphQLRejection, GraphQLBatchRequest, GraphQLRequest};
 use axum::{
     body::Body,
     extract::FromRequest,
@@ -19,9 +19,9 @@ use axum::{
 use futures_util::{future::BoxFuture, StreamExt};
 
 async fn make_playground(graphql_path: String) -> Html<String> {
-    Html(playground_source(
-        GraphQLPlaygroundConfig::new(&graphql_path),
-    ))
+    Html(playground_source(GraphQLPlaygroundConfig::new(
+        &graphql_path,
+    )))
 }
 
 /// GraphQL handler that uses a short multipart heartbeat (1 s) so idle
@@ -71,12 +71,13 @@ where
                     .body(body)
                     .expect("BUG: invalid response"))
             } else {
-                let batch = match GraphQLBatchRequest::<GraphQLRejection>::from_request(req, &()).await
-                {
-                    Ok(r) => r,
-                    Err(e) => return Ok(axum::response::IntoResponse::into_response(e)),
-                };
-                let resp = async_graphql_axum::GraphQLResponse(executor.execute_batch(batch.0).await);
+                let batch =
+                    match GraphQLBatchRequest::<GraphQLRejection>::from_request(req, &()).await {
+                        Ok(r) => r,
+                        Err(e) => return Ok(axum::response::IntoResponse::into_response(e)),
+                    };
+                let resp =
+                    async_graphql_axum::GraphQLResponse(executor.execute_batch(batch.0).await);
                 Ok(axum::response::IntoResponse::into_response(resp))
             }
         })

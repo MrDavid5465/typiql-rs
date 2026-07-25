@@ -1,11 +1,11 @@
+use async_trait::async_trait;
+use parking_lot::RwLock;
+use serde_json::Value;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use parking_lot::RwLock;
-use serde_json::Value;
-use async_trait::async_trait;
-use uuid::Uuid;
 use typiql_core::{FieldFilter, FilterOp, Location, TypiQLAdapter};
+use uuid::Uuid;
 
 /// File = schema (a namespace holding one or more named tables), top-level
 /// JSON property = table. Most types share one file (`<data_dir>/data.json`,
@@ -17,10 +17,12 @@ use typiql_core::{FieldFilter, FilterOp, Location, TypiQLAdapter};
 /// All data is cached in-memory per file (not per table — a file's tables
 /// are read/written together, since they live in one JSON object on disk).
 /// Writes go to disk synchronously on mutation.
+type FileTables = HashMap<PathBuf, HashMap<String, Vec<Value>>>;
+
 #[derive(Clone)]
 pub struct JsonAdapter {
     data_dir: PathBuf,
-    files: Arc<RwLock<HashMap<PathBuf, HashMap<String, Vec<Value>>>>>,
+    files: Arc<RwLock<FileTables>>,
 }
 
 impl JsonAdapter {
@@ -123,16 +125,18 @@ impl JsonAdapter {
         match filter.op {
             FilterOp::Eq => item_val == Some(&filter.value),
             FilterOp::Ne => item_val != Some(&filter.value),
-            FilterOp::Gt => item_val
-                .and_then(|v| Self::compare_values(v, &filter.value))
-                == Some(std::cmp::Ordering::Greater),
+            FilterOp::Gt => {
+                item_val.and_then(|v| Self::compare_values(v, &filter.value))
+                    == Some(std::cmp::Ordering::Greater)
+            }
             FilterOp::Gte => matches!(
                 item_val.and_then(|v| Self::compare_values(v, &filter.value)),
                 Some(std::cmp::Ordering::Greater) | Some(std::cmp::Ordering::Equal)
             ),
-            FilterOp::Lt => item_val
-                .and_then(|v| Self::compare_values(v, &filter.value))
-                == Some(std::cmp::Ordering::Less),
+            FilterOp::Lt => {
+                item_val.and_then(|v| Self::compare_values(v, &filter.value))
+                    == Some(std::cmp::Ordering::Less)
+            }
             FilterOp::Lte => matches!(
                 item_val.and_then(|v| Self::compare_values(v, &filter.value)),
                 Some(std::cmp::Ordering::Less) | Some(std::cmp::Ordering::Equal)
@@ -147,6 +151,30 @@ impl JsonAdapter {
                 .as_array()
                 .map(|arr| item_val.map(|v| !arr.contains(v)).unwrap_or(true))
                 .unwrap_or(true),
+            FilterOp::StartsWith => {
+                Self::str_match(item_val, &filter.value, |s, n| s.starts_with(n))
+            }
+            FilterOp::EndsWith => Self::str_match(item_val, &filter.value, |s, n| s.ends_with(n)),
+            FilterOp::Contains => Self::str_match(item_val, &filter.value, |s, n| s.contains(n)),
+            FilterOp::NotStartsWith => {
+                !Self::str_match(item_val, &filter.value, |s, n| s.starts_with(n))
+            }
+            FilterOp::NotEndsWith => {
+                !Self::str_match(item_val, &filter.value, |s, n| s.ends_with(n))
+            }
+            FilterOp::NotContains => {
+                !Self::str_match(item_val, &filter.value, |s, n| s.contains(n))
+            }
+        }
+    }
+
+    /// Shared helper for the `LIKE`-style string operators — both sides must
+    /// be strings (a type mismatch never matches, mirroring `Eq`'s behavior
+    /// for non-string comparisons).
+    fn str_match(item_val: Option<&Value>, needle: &Value, f: impl Fn(&str, &str) -> bool) -> bool {
+        match (item_val.and_then(Value::as_str), needle.as_str()) {
+            (Some(s), Some(n)) => f(s, n),
+            _ => false,
         }
     }
 
@@ -157,12 +185,7 @@ impl JsonAdapter {
 
 #[async_trait]
 impl TypiQLAdapter for JsonAdapter {
-    async fn get_one(
-        &self,
-        location: Location,
-        key_field: &str,
-        key_value: &str,
-    ) -> Option<Value> {
+    async fn get_one(&self, location: Location, key_field: &str, key_value: &str) -> Option<Value> {
         let (path, table) = self.resolve(&location);
         self.read_table(&path, &table).into_iter().find(|item| {
             item.get(key_field)
@@ -172,11 +195,7 @@ impl TypiQLAdapter for JsonAdapter {
         })
     }
 
-    async fn get_many(
-        &self,
-        location: Location,
-        filters: Vec<FieldFilter>,
-    ) -> Vec<Value> {
+    async fn get_many(&self, location: Location, filters: Vec<FieldFilter>) -> Vec<Value> {
         let (path, table) = self.resolve(&location);
         let data = self.read_table(&path, &table);
         if filters.is_empty() {
@@ -233,6 +252,38 @@ impl TypiQLAdapter for JsonAdapter {
         Ok(values)
     }
 
+    async fn add_many(
+        &self,
+        location: Location,
+        key_field: &str,
+        values: Vec<Value>,
+    ) -> Result<Vec<Value>, String> {
+        let (path, table) = self.resolve(&location);
+        let mut data = self.read_table(&path, &table);
+        let mut added = Vec::with_capacity(values.len());
+
+        for mut v in values {
+            let needs_id = v
+                .get(key_field)
+                .and_then(Value::as_str)
+                .map(str::is_empty)
+                .unwrap_or(true);
+            if needs_id {
+                if let Value::Object(ref mut map) = v {
+                    map.insert(
+                        key_field.to_string(),
+                        Value::String(Uuid::new_v4().to_string()),
+                    );
+                }
+            }
+            data.push(v.clone());
+            added.push(v);
+        }
+
+        self.write_table(&path, &table, data);
+        Ok(added)
+    }
+
     async fn update(
         &self,
         location: Location,
@@ -252,9 +303,7 @@ impl TypiQLAdapter for JsonAdapter {
                 .unwrap_or(false);
 
             if is_match {
-                if let (Value::Object(item_map), Value::Object(patch_map)) =
-                    (item, &patch)
-                {
+                if let (Value::Object(item_map), Value::Object(patch_map)) = (item, &patch) {
                     for (k, v) in patch_map {
                         if k != key_field {
                             item_map.insert(k.clone(), v.clone());
@@ -272,12 +321,7 @@ impl TypiQLAdapter for JsonAdapter {
         updated
     }
 
-    async fn remove(
-        &self,
-        location: Location,
-        key_field: &str,
-        key_value: &str,
-    ) -> Option<Value> {
+    async fn remove(&self, location: Location, key_field: &str, key_value: &str) -> Option<Value> {
         let (path, table) = self.resolve(&location);
         let data = self.read_table(&path, &table);
         let mut removed: Option<Value> = None;

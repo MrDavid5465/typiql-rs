@@ -1,3 +1,6 @@
 [workspace]
-members = ["crates/typiql-macros", "crates/typiql-core", "crates/typiql-adapter-json"]
+members = ["crates/typiql-macros", "crates/typiql-core", "crates/typiql-adapter-json", "crates/typiql-adapter-duckdb"]
 resolver = "2"
+
+[workspace.package]
+repository = "https://github.com/MrDavid5465/typiql-rs"

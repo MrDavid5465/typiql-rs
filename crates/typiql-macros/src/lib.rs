@@ -1,9 +1,8 @@
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::{format_ident, quote};
-use syn::{
-    parse_macro_input, Data, DeriveInput, Fields, Ident, LitStr, Token,
-};
+use syn::parse::Parser;
+use syn::{parse_macro_input, Data, DeriveInput, Fields, Ident, LitStr, Token};
 
 // ── helpers ─────────────────────────────────────────────────────────────────
 
@@ -55,6 +54,77 @@ fn scalar_type_name(ty: &syn::Type) -> Option<String> {
     }
 }
 
+fn is_option_type(ty: &syn::Type) -> bool {
+    if let syn::Type::Path(type_path) = ty {
+        if let Some(segment) = type_path.path.segments.last() {
+            return segment.ident == "Option";
+        }
+    }
+    false
+}
+
+fn is_vec_type(ty: &syn::Type) -> bool {
+    if let syn::Type::Path(type_path) = ty {
+        if let Some(segment) = type_path.path.segments.last() {
+            return segment.ident == "Vec";
+        }
+    }
+    false
+}
+
+/// The bare `T` of a `Vec<T>` field type — used for has-many relation
+/// fields (`#[typiql(relation(...))]` on a `Vec<Target>` field, rather than
+/// the has-one `Option<Target>` shape). Returns the type unchanged if it
+/// isn't actually `Vec<...>`.
+fn vec_inner_type(ty: &syn::Type) -> &syn::Type {
+    if let syn::Type::Path(type_path) = ty {
+        if let Some(segment) = type_path.path.segments.last() {
+            if segment.ident == "Vec" {
+                if let syn::PathArguments::AngleBracketed(args) = &segment.arguments {
+                    if let Some(syn::GenericArgument::Type(inner)) = args.args.first() {
+                        return inner;
+                    }
+                }
+            }
+        }
+    }
+    ty
+}
+
+/// Maps a field's Rust type to a DuckDB column-type string, used to derive
+/// `TypiQLType::duckdb_columns()` at macro-expansion time — see
+/// `#[typiql_type(adapter = "duckdb")]`. Scalars get their natural DuckDB
+/// equivalent; anything else (nested structs, `Vec<T>`, enums without a
+/// direct scalar mapping) falls back to `VARCHAR` and is expected to be
+/// JSON-serialized by the adapter, matching the "big/irregular data as a
+/// JSON string column" convention already used elsewhere in this app (e.g.
+/// `Dashboard.elements`). `Option<T>` maps to `T`'s type without `NOT NULL`;
+/// everything else is `NOT NULL`.
+fn duckdb_type_for(ty: &syn::Type) -> String {
+    let nullable = is_option_type(ty);
+    let base = match scalar_type_name(ty).as_deref() {
+        Some("String") | Some("str") => "VARCHAR",
+        Some("bool") => "BOOLEAN",
+        Some("f32") | Some("f64") => "DOUBLE",
+        Some("i8") => "TINYINT",
+        Some("i16") => "SMALLINT",
+        Some("i32") => "INTEGER",
+        Some("i64") | Some("isize") => "BIGINT",
+        Some("i128") => "HUGEINT",
+        Some("u8") => "UTINYINT",
+        Some("u16") => "USMALLINT",
+        Some("u32") => "UINTEGER",
+        Some("u64") | Some("usize") => "UBIGINT",
+        Some("u128") => "UHUGEINT",
+        _ => "VARCHAR",
+    };
+    if nullable {
+        base.to_string()
+    } else {
+        format!("{} NOT NULL", base)
+    }
+}
+
 /// One generated filter-operator variant for a field: `suffix` is appended to
 /// the field name for the GraphQL argument (`""` for bare equality), `op` is
 /// the `FilterOp` variant ident to emit, `is_list` means the argument takes
@@ -67,32 +137,130 @@ struct OpSpec {
 
 fn op_specs_for(ty: &syn::Type) -> Vec<OpSpec> {
     const EQ_NE: &[OpSpec] = &[
-        OpSpec { suffix: "", op: "Eq", is_list: false },
-        OpSpec { suffix: "_ne", op: "Ne", is_list: false },
+        OpSpec {
+            suffix: "",
+            op: "Eq",
+            is_list: false,
+        },
+        OpSpec {
+            suffix: "_ne",
+            op: "Ne",
+            is_list: false,
+        },
     ];
     const FULL: &[OpSpec] = &[
-        OpSpec { suffix: "", op: "Eq", is_list: false },
-        OpSpec { suffix: "_ne", op: "Ne", is_list: false },
-        OpSpec { suffix: "_gt", op: "Gt", is_list: false },
-        OpSpec { suffix: "_gte", op: "Gte", is_list: false },
-        OpSpec { suffix: "_lt", op: "Lt", is_list: false },
-        OpSpec { suffix: "_lte", op: "Lte", is_list: false },
-        OpSpec { suffix: "_in", op: "In", is_list: true },
-        OpSpec { suffix: "_not_in", op: "NotIn", is_list: true },
+        OpSpec {
+            suffix: "",
+            op: "Eq",
+            is_list: false,
+        },
+        OpSpec {
+            suffix: "_ne",
+            op: "Ne",
+            is_list: false,
+        },
+        OpSpec {
+            suffix: "_gt",
+            op: "Gt",
+            is_list: false,
+        },
+        OpSpec {
+            suffix: "_gte",
+            op: "Gte",
+            is_list: false,
+        },
+        OpSpec {
+            suffix: "_lt",
+            op: "Lt",
+            is_list: false,
+        },
+        OpSpec {
+            suffix: "_lte",
+            op: "Lte",
+            is_list: false,
+        },
+        OpSpec {
+            suffix: "_in",
+            op: "In",
+            is_list: true,
+        },
+        OpSpec {
+            suffix: "_not_in",
+            op: "NotIn",
+            is_list: true,
+        },
     ];
-    let ordered = matches!(
-        scalar_type_name(ty).as_deref(),
-        Some(
-            "String" | "str"
-                | "i8" | "i16" | "i32" | "i64" | "i128" | "isize"
-                | "u8" | "u16" | "u32" | "u64" | "u128" | "usize"
-                | "f32" | "f64"
-        )
-    );
-    (if ordered { FULL } else { EQ_NE })
+    // LIKE-style operators only make sense for strings — matches C#
+    // SqlData.cs, where startsWith/endsWith/contains are string-only too.
+    const STRING_EXTRA: &[OpSpec] = &[
+        OpSpec {
+            suffix: "_starts_with",
+            op: "StartsWith",
+            is_list: false,
+        },
+        OpSpec {
+            suffix: "_ends_with",
+            op: "EndsWith",
+            is_list: false,
+        },
+        OpSpec {
+            suffix: "_contains",
+            op: "Contains",
+            is_list: false,
+        },
+        OpSpec {
+            suffix: "_not_starts_with",
+            op: "NotStartsWith",
+            is_list: false,
+        },
+        OpSpec {
+            suffix: "_not_ends_with",
+            op: "NotEndsWith",
+            is_list: false,
+        },
+        OpSpec {
+            suffix: "_not_contains",
+            op: "NotContains",
+            is_list: false,
+        },
+    ];
+    let type_name = scalar_type_name(ty);
+    let is_string = matches!(type_name.as_deref(), Some("String") | Some("str"));
+    let ordered = is_string
+        || matches!(
+            type_name.as_deref(),
+            Some(
+                "i8" | "i16"
+                    | "i32"
+                    | "i64"
+                    | "i128"
+                    | "isize"
+                    | "u8"
+                    | "u16"
+                    | "u32"
+                    | "u64"
+                    | "u128"
+                    | "usize"
+                    | "f32"
+                    | "f64"
+            )
+        );
+    let mut specs: Vec<OpSpec> = (if ordered { FULL } else { EQ_NE })
         .iter()
-        .map(|s| OpSpec { suffix: s.suffix, op: s.op, is_list: s.is_list })
-        .collect()
+        .map(|s| OpSpec {
+            suffix: s.suffix,
+            op: s.op,
+            is_list: s.is_list,
+        })
+        .collect();
+    if is_string {
+        specs.extend(STRING_EXTRA.iter().map(|s| OpSpec {
+            suffix: s.suffix,
+            op: s.op,
+            is_list: s.is_list,
+        }));
+    }
+    specs
 }
 
 // ── per-field metadata ───────────────────────────────────────────────────────
@@ -182,7 +350,10 @@ fn parse_field_info(f: &syn::Field) -> FieldInfo {
                         Ok(())
                     })?;
                     if let (Some(file), Some(table)) = (file, table) {
-                        file_table_relation = Some(FileTableRelation { file_template: file, table });
+                        file_table_relation = Some(FileTableRelation {
+                            file_template: file,
+                            table,
+                        });
                     } else if let (Some(local), Some(foreign)) = (local, foreign) {
                         let op = op.unwrap_or_else(|| "eq".to_string());
                         // Batched relation loading currently only implements
@@ -193,7 +364,7 @@ fn parse_field_info(f: &syn::Field) -> FieldInfo {
                         // stays in place so lifting this restriction later
                         // only needs RelationLoader's key type to carry the
                         // operator, not new attribute parsing.
-                        if op_ident(&op).to_string() != "Eq" {
+                        if op_ident(&op) != "Eq" {
                             panic!(
                                 "#[typiql(relation(op = {:?}))] is not yet supported — \
                                  relation conditions must use op = \"eq\" for now",
@@ -211,7 +382,15 @@ fn parse_field_info(f: &syn::Field) -> FieldInfo {
         }
     }
 
-    FieldInfo { ident, ty, is_key, data_name, relations, file_table_relation, other_attrs }
+    FieldInfo {
+        ident,
+        ty,
+        is_key,
+        data_name,
+        relations,
+        file_table_relation,
+        other_attrs,
+    }
 }
 
 /// Extracts `{field}`-style placeholder names from a template string, in
@@ -219,8 +398,8 @@ fn parse_field_info(f: &syn::Field) -> FieldInfo {
 /// self.field, ...)` for a `FileTableRelation`'s `file` template.
 fn template_fields(template: &str) -> Vec<String> {
     let mut fields = Vec::new();
-    let mut chars = template.char_indices().peekable();
-    while let Some((i, c)) = chars.next() {
+    let chars = template.char_indices();
+    for (i, c) in chars {
         if c == '{' {
             if let Some(end) = template[i + 1..].find('}') {
                 let name = &template[i + 1..i + 1 + end];
@@ -243,7 +422,10 @@ fn op_ident(op: &str) -> proc_macro2::Ident {
         "lte" => "Lte",
         "in" => "In",
         "not_in" => "NotIn",
-        other => panic!("unknown relation op {:?} — expected eq/ne/gt/gte/lt/lte/in/not_in", other),
+        other => panic!(
+            "unknown relation op {:?} — expected eq/ne/gt/gte/lt/lte/in/not_in",
+            other
+        ),
     };
     format_ident!("{}", variant)
 }
@@ -295,10 +477,41 @@ fn op_ident(op: &str) -> proc_macro2::Ident {
 /// against) and it's not registered in `typiql_schema!`. Reachable only via
 /// a relation field on another type, or hand-written resolvers calling the
 /// adapter directly with an explicit `Location`.
+///
+/// Struct-level `#[typiql_type(adapter = "…")]` picks which registered
+/// adapter (see `typiql_schema!`'s `HashMap<&str, Arc<dyn TypiQLAdapter>>`)
+/// stores this type — defaults to `"default"` if omitted. `adapter =
+/// "duckdb"` additionally derives `TypiQLType::duckdb_columns()` from each
+/// non-relation field's Rust type (see `duckdb_type_for`), so
+/// `DuckDbAdapter` can generically `CREATE TABLE IF NOT EXISTS` for this
+/// type with no per-type hand-written DDL. Both attributes can be combined:
+/// `#[typiql_type(no_location, adapter = "duckdb")]`.
 #[proc_macro_attribute]
 pub fn typiql_type(attr: TokenStream, item: TokenStream) -> TokenStream {
     let attr2: TokenStream2 = attr.into();
-    let is_dumb = attr2.to_string().split(',').any(|t| t.trim() == "no_location");
+    let mut is_dumb = false;
+    let mut adapter_attr: Option<String> = None;
+    if !attr2.is_empty() {
+        let parser = syn::punctuated::Punctuated::<syn::Meta, Token![,]>::parse_terminated;
+        let metas = parser.parse2(attr2.clone()).unwrap_or_default();
+        for meta in metas {
+            match meta {
+                syn::Meta::Path(p) if p.is_ident("no_location") => is_dumb = true,
+                syn::Meta::NameValue(nv) if nv.path.is_ident("adapter") => {
+                    if let syn::Expr::Lit(syn::ExprLit {
+                        lit: syn::Lit::Str(s),
+                        ..
+                    }) = nv.value
+                    {
+                        adapter_attr = Some(s.value());
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    let adapter_str = adapter_attr.unwrap_or_else(|| "default".to_string());
+    let is_duckdb = adapter_str == "duckdb";
 
     let input = parse_macro_input!(item as DeriveInput);
     let name = &input.ident;
@@ -331,25 +544,31 @@ pub fn typiql_type(attr: TokenStream, item: TokenStream) -> TokenStream {
     // (they're never part of this record's own JSON — only the plain scalar
     // field(s) they're matched against are, for local/foreign relations; a
     // file/table relation has no local field to keep, it's purely computed).
-    let struct_fields: Vec<TokenStream2> = field_infos.iter().map(|fi| {
-        let ident = &fi.ident;
-        let ty = &fi.ty;
-        let attrs = &fi.other_attrs;
-        let serde_rename = fi.data_name.as_ref().map(|dn| {
-            quote! { #[serde(rename = #dn)] }
-        });
-        let serde_default = (!fi.is_key).then(|| quote! { #[serde(default)] });
-        let relation_skip = fi.is_relation().then(|| quote! { #[graphql(skip)] #[serde(skip)] });
-        quote! {
-            #(#attrs)*
-            #serde_rename
-            #serde_default
-            #relation_skip
-            pub #ident: #ty,
-        }
-    }).collect();
+    let struct_fields: Vec<TokenStream2> = field_infos
+        .iter()
+        .map(|fi| {
+            let ident = &fi.ident;
+            let ty = &fi.ty;
+            let attrs = &fi.other_attrs;
+            let serde_rename = fi.data_name.as_ref().map(|dn| {
+                quote! { #[serde(rename = #dn)] }
+            });
+            let serde_default = (!fi.is_key).then(|| quote! { #[serde(default)] });
+            let relation_skip = fi
+                .is_relation()
+                .then(|| quote! { #[graphql(skip)] #[serde(skip)] });
+            quote! {
+                #(#attrs)*
+                #serde_rename
+                #serde_default
+                #relation_skip
+                pub #ident: #ty,
+            }
+        })
+        .collect();
 
-    let non_key: Vec<&FieldInfo> = field_infos.iter()
+    let non_key: Vec<&FieldInfo> = field_infos
+        .iter()
         .filter(|fi| !fi.is_key && !fi.is_relation())
         .collect();
 
@@ -383,9 +602,24 @@ pub fn typiql_type(attr: TokenStream, item: TokenStream) -> TokenStream {
     // the key, unaffected). Shared by both the list query and the get-one
     // query, which is filter-based like the list query rather than an
     // exact-key-only lookup (get_fn below).
-    let filterable: Vec<&FieldInfo> = field_infos.iter()
-        .filter(|fi| !fi.is_relation())
-        .collect();
+    let filterable: Vec<&FieldInfo> = field_infos.iter().filter(|fi| !fi.is_relation()).collect();
+
+    // Column name/DuckDB-type pairs for `TypiQLType::duckdb_columns()` —
+    // only populated for `adapter = "duckdb"` types; empty otherwise (the
+    // trait's default already returns `&[]`, so an empty override here is
+    // never actually emitted — see `duckdb_columns_fn` below).
+    let duckdb_column_entries: Vec<TokenStream2> = if is_duckdb {
+        filterable
+            .iter()
+            .map(|fi| {
+                let col_name = fi.data_name.clone().unwrap_or_else(|| fi.ident.to_string());
+                let col_type = duckdb_type_for(&fi.ty);
+                quote! { (#col_name, #col_type) }
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
 
     // One GraphQL argument per applicable filter operator per plain field —
     // e.g. `count: Option<i32>, count_ne: Option<i32>, count_gt: Option<i32>, ...`.
@@ -416,16 +650,24 @@ pub fn typiql_type(attr: TokenStream, item: TokenStream) -> TokenStream {
     }
 
     // Companion ComplexObject resolvers for relation fields, if any.
-    // local/foreign relations resolve via the per-target-type DataLoader
-    // registered by typiql_schema!, batching this field's lookup across
-    // every row in the same GraphQL execution instead of one adapter call
-    // per row. file/table relations resolve via a direct adapter call —
-    // not batched, since each parent record's file is already unique (no
-    // shared collection to batch a lookup against).
+    // Has-one (`Option<Target>`) local/foreign relations resolve via the
+    // per-target-type DataLoader registered by typiql_schema!, batching
+    // this field's lookup across every row in the same GraphQL execution
+    // instead of one adapter call per row. Has-many (`Vec<Target>`)
+    // local/foreign relations — e.g. Recording's many RecordingFrame rows —
+    // aren't DataLoader-batched (there's no single-related-row cache key to
+    // share), but need no relation-specific adapter plumbing either: they
+    // resolve through the exact same `resolve_list::<Target>` every plain
+    // list query already uses, which already picks the right adapter via
+    // `Target::adapter_name()` — so a has-many relation crosses adapters
+    // (e.g. a JSON parent to a DuckDB child) automatically, same as has-one.
+    // file/table relations resolve via a direct adapter call — not batched,
+    // since each parent record's file is already unique (no shared
+    // collection to batch a lookup against).
     let complex_object_block = has_relations.then(|| {
         let mut resolvers: Vec<TokenStream2> = Vec::new();
 
-        for fi in field_infos.iter().filter(|fi| !fi.relations.is_empty()) {
+        for fi in field_infos.iter().filter(|fi| !fi.relations.is_empty() && !is_vec_type(&fi.ty)) {
             let field_ident = &fi.ident;
             let target_ty = unwrap_option(&fi.ty);
             let local_idents: Vec<proc_macro2::Ident> = fi.relations.iter()
@@ -450,6 +692,48 @@ pub fn typiql_type(attr: TokenStream, item: TokenStream) -> TokenStream {
             });
         }
 
+        for fi in field_infos.iter().filter(|fi| !fi.relations.is_empty() && is_vec_type(&fi.ty)) {
+            let field_ident = &fi.ident;
+            let target_ty = vec_inner_type(&fi.ty);
+
+            let filter_pushes: Vec<TokenStream2> = fi.relations.iter().map(|r| {
+                let local_ident = format_ident!("{}", r.local);
+                let foreign_str = &r.foreign;
+                let local_field_is_option = field_infos.iter()
+                    .find(|other| other.ident == local_ident)
+                    .map(|other| is_option_type(&other.ty))
+                    .unwrap_or(false);
+                if local_field_is_option {
+                    quote! {
+                        match &self.#local_ident {
+                            ::std::option::Option::Some(__v) => __filters.push(::typiql::FieldFilter {
+                                field: #foreign_str.to_string(),
+                                op: ::typiql::FilterOp::Eq,
+                                value: ::serde_json::Value::String(__v.clone()),
+                            }),
+                            ::std::option::Option::None => return ::std::result::Result::Ok(::std::vec::Vec::new()),
+                        }
+                    }
+                } else {
+                    quote! {
+                        __filters.push(::typiql::FieldFilter {
+                            field: #foreign_str.to_string(),
+                            op: ::typiql::FilterOp::Eq,
+                            value: ::serde_json::Value::String(self.#local_ident.clone()),
+                        });
+                    }
+                }
+            }).collect();
+
+            resolvers.push(quote! {
+                async fn #field_ident(&self, ctx: &::async_graphql::Context<'_>) -> ::async_graphql::Result<::std::vec::Vec<#target_ty>> {
+                    let mut __filters: ::std::vec::Vec<::typiql::FieldFilter> = ::std::vec::Vec::new();
+                    #(#filter_pushes)*
+                    ::typiql::resolve_list::<#target_ty>(ctx, __filters).await
+                }
+            });
+        }
+
         for fi in field_infos.iter().filter(|fi| fi.file_table_relation.is_some()) {
             let field_ident = &fi.ident;
             let target_ty = unwrap_option(&fi.ty);
@@ -461,7 +745,18 @@ pub fn typiql_type(attr: TokenStream, item: TokenStream) -> TokenStream {
 
             resolvers.push(quote! {
                 async fn #field_ident(&self, ctx: &::async_graphql::Context<'_>) -> ::async_graphql::Result<::std::option::Option<#target_ty>> {
-                    let __adapter = ctx.data::<::std::sync::Arc<dyn ::typiql::TypiQLAdapter>>()?;
+                    // File/table relations use an arbitrary per-record computed
+                    // file path (see `Location::At`) — a JsonAdapter-specific
+                    // idiom (one file per record) that has no DuckDB analog, so
+                    // (unlike local/foreign relations) this always resolves
+                    // against the "default" adapter rather than a per-target
+                    // adapter_name() — dumb (`no_location`) target types don't
+                    // implement `TypiQLType` at all, so there's no adapter_name()
+                    // to read here even in principle.
+                    let __adapters = ctx.data::<::typiql::AdapterMap>()?;
+                    let __adapter = __adapters.get("default").ok_or_else(|| {
+                        ::async_graphql::Error::new("no adapter registered under name \"default\"")
+                    })?;
                     let __file = ::std::path::PathBuf::from(::std::format!(#template, #(#tpl_field_idents = self.#tpl_field_idents),*));
                     let __rows = __adapter.get_many(::typiql::Location::At { file: __file, table: #table.to_string() }, ::std::vec::Vec::new()).await;
                     ::std::result::Result::Ok(__rows.into_iter().next().and_then(|v| ::serde_json::from_value(v).ok()))
@@ -480,7 +775,9 @@ pub fn typiql_type(attr: TokenStream, item: TokenStream) -> TokenStream {
     let input_name = format_ident!("{}Input", name);
 
     let vis = &input.vis;
-    let other_struct_attrs: Vec<_> = input.attrs.iter()
+    let other_struct_attrs: Vec<_> = input
+        .attrs
+        .iter()
         .filter(|a| !a.path().is_ident("typiql_type"))
         .collect();
     let complex_attr = has_relations.then(|| quote! { #[graphql(complex)] });
@@ -510,12 +807,25 @@ pub fn typiql_type(attr: TokenStream, item: TokenStream) -> TokenStream {
         let remove_fn     = format_ident!("remove_{}", &name_snake);
         let changed_fn    = format_ident!("{}_changed", &name_snake);
 
+        let adapter_name_fn = (adapter_str != "default").then(|| {
+            quote! { fn adapter_name() -> &'static str { #adapter_str } }
+        });
+        let duckdb_columns_fn = is_duckdb.then(|| {
+            quote! {
+                fn duckdb_columns() -> &'static [(&'static str, &'static str)] {
+                    &[ #(#duckdb_column_entries),* ]
+                }
+            }
+        });
+
         quote! {
             impl ::typiql::TypiQLType for #name {
                 type Input = #input_name;
                 fn type_name()       -> &'static str { #name_str }
                 fn key_field()       -> &'static str { #key_field_str }
                 fn collection_name() -> &'static str { #collection_name }
+                #adapter_name_fn
+                #duckdb_columns_fn
             }
 
             // ── Change event broadcast type ──────────────────────────────────
@@ -691,7 +1001,9 @@ impl syn::parse::Parse for TypiQLSchemaInput {
         let mut types = vec![];
         while !input.is_empty() && !input.peek(Token![;]) {
             types.push(input.parse::<Ident>()?);
-            if input.peek(Token![,]) { let _: Token![,] = input.parse()?; }
+            if input.peek(Token![,]) {
+                let _: Token![,] = input.parse()?;
+            }
         }
 
         let mut extra_queries = vec![];
@@ -699,7 +1011,9 @@ impl syn::parse::Parse for TypiQLSchemaInput {
             let _: Token![;] = input.parse()?;
             while !input.is_empty() && !input.peek(Token![;]) {
                 extra_queries.push(input.parse::<Ident>()?);
-                if input.peek(Token![,]) { let _: Token![,] = input.parse()?; }
+                if input.peek(Token![,]) {
+                    let _: Token![,] = input.parse()?;
+                }
             }
         }
 
@@ -708,7 +1022,9 @@ impl syn::parse::Parse for TypiQLSchemaInput {
             let _: Token![;] = input.parse()?;
             while !input.is_empty() && !input.peek(Token![;]) {
                 extra_mutations.push(input.parse::<Ident>()?);
-                if input.peek(Token![,]) { let _: Token![,] = input.parse()?; }
+                if input.peek(Token![,]) {
+                    let _: Token![,] = input.parse()?;
+                }
             }
         }
 
@@ -718,11 +1034,18 @@ impl syn::parse::Parse for TypiQLSchemaInput {
             let _: Token![;] = input.parse()?;
             while !input.is_empty() {
                 extra_subscriptions.push(input.parse::<Ident>()?);
-                if input.peek(Token![,]) { let _: Token![,] = input.parse()?; }
+                if input.peek(Token![,]) {
+                    let _: Token![,] = input.parse()?;
+                }
             }
         }
 
-        Ok(TypiQLSchemaInput { types, extra_queries, extra_mutations, extra_subscriptions })
+        Ok(TypiQLSchemaInput {
+            types,
+            extra_queries,
+            extra_mutations,
+            extra_subscriptions,
+        })
     }
 }
 
@@ -738,27 +1061,47 @@ impl syn::parse::Parse for TypiQLSchemaInput {
 ///   - `TypiQLQuery`        — merged CRUD queries + extra queries
 ///   - `TypiQLMutation`     — merged CRUD mutations + extra mutations
 ///   - `TypiQLSubscription` — merged per-type change subscriptions + extra subscriptions
-///   - `build_typiql_schema(adapter)` — schema builder function. Registers
-///     the raw adapter (`Arc<dyn TypiQLAdapter>`, for custom resolvers) plus
-///     one `DataLoader<RelationLoader<T>>` per type in the list, so any
-///     relation field pointing at that type resolves batched.
+///   - `build_typiql_schema(adapters)` — schema builder function, taking a
+///     `HashMap<&'static str, Arc<dyn TypiQLAdapter>>` keyed by adapter name
+///     (see `#[typiql_type(adapter = "…")]`). Registers the whole map (for
+///     custom resolvers, and for `resolve_add`/`list`/`update`/`remove` to
+///     pick the right adapter per type) plus one `DataLoader<RelationLoader<T>>`
+///     per type in the list, each built against `adapters[T::adapter_name()]`
+///     — so a relation field pointing at a DuckDB-backed type resolves
+///     against DuckDB even when the parent type is JSON-backed, with no
+///     relation-specific special-casing.
 #[proc_macro]
 pub fn typiql_schema(input: TokenStream) -> TokenStream {
     let schema_input = parse_macro_input!(input as TypiQLSchemaInput);
 
-    let gen_query_types: Vec<proc_macro2::Ident> = schema_input.types.iter()
-        .map(|t| format_ident!("{}Query", t)).collect();
-    let gen_mutation_types: Vec<proc_macro2::Ident> = schema_input.types.iter()
-        .map(|t| format_ident!("{}Mutation", t)).collect();
-    let gen_subscription_types: Vec<proc_macro2::Ident> = schema_input.types.iter()
-        .map(|t| format_ident!("{}Subscription", t)).collect();
+    let gen_query_types: Vec<proc_macro2::Ident> = schema_input
+        .types
+        .iter()
+        .map(|t| format_ident!("{}Query", t))
+        .collect();
+    let gen_mutation_types: Vec<proc_macro2::Ident> = schema_input
+        .types
+        .iter()
+        .map(|t| format_ident!("{}Mutation", t))
+        .collect();
+    let gen_subscription_types: Vec<proc_macro2::Ident> = schema_input
+        .types
+        .iter()
+        .map(|t| format_ident!("{}Subscription", t))
+        .collect();
 
-    let all_query_types: Vec<&proc_macro2::Ident> = gen_query_types.iter()
-        .chain(schema_input.extra_queries.iter()).collect();
-    let all_mutation_types: Vec<&proc_macro2::Ident> = gen_mutation_types.iter()
-        .chain(schema_input.extra_mutations.iter()).collect();
-    let all_subscription_types: Vec<&proc_macro2::Ident> = gen_subscription_types.iter()
-        .chain(schema_input.extra_subscriptions.iter()).collect();
+    let all_query_types: Vec<&proc_macro2::Ident> = gen_query_types
+        .iter()
+        .chain(schema_input.extra_queries.iter())
+        .collect();
+    let all_mutation_types: Vec<&proc_macro2::Ident> = gen_mutation_types
+        .iter()
+        .chain(schema_input.extra_mutations.iter())
+        .collect();
+    let all_subscription_types: Vec<&proc_macro2::Ident> = gen_subscription_types
+        .iter()
+        .chain(schema_input.extra_subscriptions.iter())
+        .collect();
 
     let types = &schema_input.types;
 
@@ -773,22 +1116,43 @@ pub fn typiql_schema(input: TokenStream) -> TokenStream {
         pub struct TypiQLSubscription(#(#all_subscription_types),*);
 
         pub fn build_typiql_schema(
-            adapter: impl ::typiql::TypiQLAdapter + 'static,
+            adapters: ::typiql::AdapterMap,
         ) -> ::async_graphql::Schema<
             TypiQLQuery,
             TypiQLMutation,
             TypiQLSubscription,
         > {
-            let __adapter: ::std::sync::Arc<dyn ::typiql::TypiQLAdapter> = ::std::sync::Arc::new(adapter);
+            // Give every type's adapter a chance to set up a fixed schema
+            // (e.g. DuckDB's CREATE TABLE) from that type's own
+            // duckdb_columns(), before any query can run. A no-op for
+            // adapters with no fixed schema (JSON, ...).
+            #(
+                adapters.get(<#types as ::typiql::TypiQLType>::adapter_name())
+                    .unwrap_or_else(|| panic!(
+                        "typiql_schema!: no adapter registered under name {:?} (needed by type {:?})",
+                        <#types as ::typiql::TypiQLType>::adapter_name(),
+                        <#types as ::typiql::TypiQLType>::type_name(),
+                    ))
+                    .register_type(<#types as ::typiql::TypiQLType>::collection_name(), <#types as ::typiql::TypiQLType>::duckdb_columns());
+            )*
+
             ::async_graphql::Schema::build(
                 TypiQLQuery::default(),
                 TypiQLMutation::default(),
                 TypiQLSubscription::default(),
             )
-            .data(__adapter.clone())
+            .data(adapters.clone())
             #(
                 .data(::async_graphql::dataloader::DataLoader::new(
-                    ::typiql::RelationLoader::<#types>::new(__adapter.clone()),
+                    ::typiql::RelationLoader::<#types>::new(
+                        adapters.get(<#types as ::typiql::TypiQLType>::adapter_name())
+                            .unwrap_or_else(|| panic!(
+                                "typiql_schema!: no adapter registered under name {:?} (needed by type {:?})",
+                                <#types as ::typiql::TypiQLType>::adapter_name(),
+                                <#types as ::typiql::TypiQLType>::type_name(),
+                            ))
+                            .clone(),
+                    ),
                     ::tokio::spawn,
                 ))
             )*

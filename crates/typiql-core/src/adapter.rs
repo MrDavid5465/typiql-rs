@@ -1,6 +1,6 @@
-use std::path::PathBuf;
 use async_trait::async_trait;
 use serde_json::Value;
+use std::path::PathBuf;
 
 /// Where a type's data lives — file = schema (a namespace holding one or more
 /// named tables), top-level JSON property = table. `Named` is the common
@@ -23,15 +23,21 @@ pub enum Location {
 }
 
 impl From<&str> for Location {
-    fn from(s: &str) -> Self { Location::Named(s.to_string()) }
+    fn from(s: &str) -> Self {
+        Location::Named(s.to_string())
+    }
 }
 
 impl From<String> for Location {
-    fn from(s: String) -> Self { Location::Named(s) }
+    fn from(s: String) -> Self {
+        Location::Named(s)
+    }
 }
 
 impl From<&String> for Location {
-    fn from(s: &String) -> Self { Location::Named(s.clone()) }
+    fn from(s: &String) -> Self {
+        Location::Named(s.clone())
+    }
 }
 
 /// Comparison operator for a single filter condition. Generated per-field by
@@ -48,6 +54,12 @@ pub enum FilterOp {
     Lte,
     In,
     NotIn,
+    StartsWith,
+    EndsWith,
+    NotStartsWith,
+    NotEndsWith,
+    Contains,
+    NotContains,
 }
 
 /// One filter condition: `field <op> value`. `In`/`NotIn` expect `value` to
@@ -61,19 +73,10 @@ pub struct FieldFilter {
 
 #[async_trait]
 pub trait TypiQLAdapter: Send + Sync {
-    async fn get_one(
-        &self,
-        location: Location,
-        key_field: &str,
-        key_value: &str,
-    ) -> Option<Value>;
+    async fn get_one(&self, location: Location, key_field: &str, key_value: &str) -> Option<Value>;
 
     /// All filters are AND-ed together.
-    async fn get_many(
-        &self,
-        location: Location,
-        filters: Vec<FieldFilter>,
-    ) -> Vec<Value>;
+    async fn get_many(&self, location: Location, filters: Vec<FieldFilter>) -> Vec<Value>;
 
     /// Batched relation lookup: `or_groups` is one AND-group of conditions
     /// per parent row needing a related record, matched against `location`
@@ -95,6 +98,25 @@ pub trait TypiQLAdapter: Send + Sync {
         values: Value,
     ) -> Result<Value, String>;
 
+    /// Bulk insert — appends every row in `values`, auto-assigning a UUID
+    /// key for any row missing one (same convention as `add`). Distinct from
+    /// `set_table`: this appends to existing rows rather than replacing the
+    /// whole table's contents. Default implementation loops over `add` one
+    /// row at a time; adapters with a real bulk-load path (e.g. DuckDB's
+    /// `Appender`) should override this.
+    async fn add_many(
+        &self,
+        location: Location,
+        key_field: &str,
+        values: Vec<Value>,
+    ) -> Result<Vec<Value>, String> {
+        let mut out = Vec::with_capacity(values.len());
+        for v in values {
+            out.push(self.add(location.clone(), key_field, v).await?);
+        }
+        Ok(out)
+    }
+
     async fn update(
         &self,
         location: Location,
@@ -103,12 +125,7 @@ pub trait TypiQLAdapter: Send + Sync {
         update: Value,
     ) -> Option<Value>;
 
-    async fn remove(
-        &self,
-        location: Location,
-        key_field: &str,
-        key_value: &str,
-    ) -> Option<Value>;
+    async fn remove(&self, location: Location, key_field: &str, key_value: &str) -> Option<Value>;
 
     /// Replaces a table's entire contents. `add`/`update`/`remove` are all
     /// keyed operations, which assumes every row has a stable identifying
@@ -116,4 +133,13 @@ pub trait TypiQLAdapter: Send + Sync {
     /// dashboard's own `.dashboard.json`), which always holds at most one
     /// row and has no key field of its own. Used only for that case.
     async fn set_table(&self, location: Location, rows: Vec<Value>);
+
+    /// Called once per registered type at schema-build time (see
+    /// `typiql_schema!`'s generated `build_typiql_schema`), before any query
+    /// runs — lets an adapter that needs a fixed schema up front (e.g.
+    /// DuckDB's `CREATE TABLE`) set one up generically from the type's own
+    /// `TypiQLType::duckdb_columns()`, with no per-type hand-written DDL.
+    /// Synchronous and default-no-op: most adapters (JSON, and any future
+    /// schemaless store) have no fixed schema and never override this.
+    fn register_type(&self, _table: &str, _columns: &[(&'static str, &'static str)]) {}
 }
