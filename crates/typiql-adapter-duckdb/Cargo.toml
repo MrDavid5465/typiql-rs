@@ -1,6 +1,6 @@
 [package]
 name = "typiql-adapter-duckdb"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "DuckDB adapter for typiql — columnar/analytical storage, one shared .duckdb file per adapter instance"
 license = "MIT"
