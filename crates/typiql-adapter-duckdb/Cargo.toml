@@ -16,4 +16,20 @@ serde_json   = "1"
 parking_lot  = "0.12"
 uuid         = { version = "1", features = ["v4"] }
 tokio        = { version = "1", features = ["rt"] }
-duckdb       = { version = "1", features = ["bundled"] }
+duckdb       = { version = "1" }
+
+[features]
+# Bundled by default, so ordinary builds are unchanged: `bundled` compiles
+# DuckDB's C++ amalgamation from source, needing no system library but costing
+# ~22 minutes of build time.
+#
+# Turning it off lets a build link a prebuilt libduckdb instead, via
+# DUCKDB_LIB_DIR / DUCKDB_INCLUDE_DIR -- libduckdb-sys only consults those when
+# `bundled` is off. The Flatpak build does exactly that, where it is the
+# difference between a ~42 minute and a ~6 minute build.
+#
+# A prebuilt library must match the version libduckdb-sys generated its
+# bindings against. The crate version encodes it as 1.MAJOR_MINOR_PATCH.x, so
+# libduckdb-sys 1.10505.0 means DuckDB 1.5.5.
+default = ["bundled"]
+bundled = ["duckdb/bundled"]
