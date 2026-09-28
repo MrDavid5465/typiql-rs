@@ -2196,6 +2196,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "typiql-conformance"
+version = "0.0.0"
+dependencies = [
+ "async-graphql",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "typiql-adapter-duckdb",
+ "typiql-adapter-json",
+ "typiql-core",
+]
+
+[[package]]
 name = "typiql-core"
 version = "0.1.0"
 dependencies = [

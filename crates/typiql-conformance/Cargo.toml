@@ -1,0 +1,20 @@
+[package]
+name = "typiql-conformance"
+version = "0.0.0"
+edition = "2021"
+description = "Runs one GraphQL test suite against every typiql adapter — a type must behave the same whichever adapter serves it"
+license = "MIT"
+repository.workspace = true
+publish = false
+
+[dependencies]
+# The macros emit `::typiql::…` paths, as seen from a consuming app.
+typiql = { package = "typiql-core", path = "../typiql-core" }
+typiql-adapter-json = { path = "../typiql-adapter-json" }
+typiql-adapter-duckdb = { path = "../typiql-adapter-duckdb" }
+
+async-graphql = "7"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
+tempfile = "3"
