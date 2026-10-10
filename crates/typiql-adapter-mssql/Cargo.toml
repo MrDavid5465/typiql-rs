@@ -1,0 +1,20 @@
+[package]
+name = "typiql-adapter-mssql"
+version = "0.1.0"
+edition = "2021"
+description = "SQL Server adapter for typiql — tables in a SQL Server database, queried with T-SQL"
+license = "MIT"
+repository.workspace = true
+keywords = ["graphql", "typiql", "sqlserver", "mssql", "persistence"]
+categories = ["database"]
+
+[dependencies]
+typiql-core = { path = "../typiql-core", version = "0.1" }
+
+async-trait = "0.1"
+serde_json  = "1"
+uuid        = { version = "1", features = ["v4"] }
+tokio       = { version = "1", features = ["net", "sync"] }
+tokio-util  = { version = "0.7", features = ["compat"] }
+tiberius    = { version = "0.12", default-features = false, features = ["tds73", "rustls"] }
+futures-util = "0.3"

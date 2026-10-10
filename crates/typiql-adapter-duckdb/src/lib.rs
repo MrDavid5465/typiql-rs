@@ -6,7 +6,10 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use typiql_core::query::matches_all;
-use typiql_core::{is_element_filter, FieldFilter, FilterOp, Join, JoinValue, ListQuery, Location, TypiQLAdapter};
+use typiql_core::{
+    is_element_filter, AggregateFn, AggregateSpec, FieldFilter, FilterOp, Join, JoinValue, ListQuery, Location,
+    TypiQLAdapter,
+};
 
 /// DuckDB-backed adapter for typiql — one shared `.duckdb` file holding many
 /// named tables (mirroring `JsonAdapter`'s "one file, many tables" model),
@@ -20,6 +23,12 @@ use typiql_core::{is_element_filter, FieldFilter, FilterOp, Join, JoinValue, Lis
 ///
 /// The `duckdb` crate's API is fully synchronous, so every `TypiQLAdapter`
 /// method wraps its work in `tokio::task::spawn_blocking`.
+/// An aggregate query's result: its rows, or just how many.
+enum Aggregated {
+    Rows(Vec<Value>),
+    Count(usize),
+}
+
 /// A table's (column name, column type) pairs.
 type Columns = Vec<(String, String)>;
 type TableSchemas = HashMap<String, Columns>;
@@ -305,6 +314,100 @@ impl DuckDbAdapter {
         rows.filter_map(Result::ok).collect()
     }
 
+    /// An aggregate type in SQL: the source grouped (`GROUP BY`) into the
+    /// aggregate's rows, then filtered, sorted and paged like any table —
+    /// with the reference semantics of `AggregateSpec::compute` (a sum of
+    /// nothing is 0; an empty source has no rows, even ungrouped).
+    fn aggregate_sql(&self, spec: &AggregateSpec) -> Option<(String, Columns)> {
+        let source = self.columns_for(&spec.source);
+        if source.is_empty() {
+            return None;
+        }
+        let ty = |f: &str| column_type(&source, f).to_string();
+        let numeric = |f: &str| is_integer_type(column_type(&source, f)) || column_type(&source, f) == "DOUBLE";
+        let mut select = Vec::new();
+        let mut columns: Columns = Vec::new();
+        for (out, src) in &spec.groups {
+            select.push(format!("\"{src}\" AS \"{out}\""));
+            columns.push((out.clone(), ty(src)));
+        }
+        for m in &spec.measures {
+            let f = m.field.clone().unwrap_or_default();
+            let (expr, out_ty) = match m.func {
+                AggregateFn::Count => ("COUNT(*)".to_string(), "BIGINT".to_string()),
+                AggregateFn::CountOf => (format!("COUNT(\"{f}\")"), "BIGINT".to_string()),
+                AggregateFn::Sum if !numeric(&f) => ("0".to_string(), "BIGINT".to_string()),
+                AggregateFn::Sum if is_integer_type(column_type(&source, &f)) => {
+                    (format!("CAST(COALESCE(SUM(\"{f}\"), 0) AS BIGINT)"), "BIGINT".to_string())
+                }
+                AggregateFn::Sum => (format!("COALESCE(SUM(\"{f}\"), 0)"), "DOUBLE".to_string()),
+                AggregateFn::Avg if !numeric(&f) => ("CAST(NULL AS DOUBLE)".to_string(), "DOUBLE".to_string()),
+                AggregateFn::Avg => (format!("AVG(\"{f}\")"), "DOUBLE".to_string()),
+                AggregateFn::Min => (format!("MIN(\"{f}\")"), ty(&f)),
+                AggregateFn::Max => (format!("MAX(\"{f}\")"), ty(&f)),
+            };
+            select.push(format!("{expr} AS \"{}\"", m.name));
+            columns.push((m.name.clone(), out_ty));
+        }
+        let group_by = if spec.groups.is_empty() {
+            " HAVING COUNT(*) > 0".to_string()
+        } else {
+            format!(" GROUP BY {}", spec.groups.iter().map(|(_, src)| format!("\"{src}\"")).collect::<Vec<_>>().join(", "))
+        };
+        Some((format!("SELECT {} FROM \"{}\"{group_by}", select.join(", "), spec.source), columns))
+    }
+
+    fn aggregate_blocking(&self, spec: AggregateSpec, q: ListQuery, count_only: bool) -> Aggregated {
+        let Ok(conn_arc) = self.connection_for(&self.default_path) else {
+            return Aggregated::Rows(vec![]);
+        };
+        let conn = conn_arc.lock();
+        self.ensure_table(&self.default_path.clone(), &spec.source, &conn);
+        let Some((inner, columns)) = self.aggregate_sql(&spec) else {
+            return Aggregated::Rows(vec![]);
+        };
+        let (where_sql, params) = build_where_and(&q.filters, &columns);
+        if count_only {
+            let sql = format!("SELECT COUNT(*) FROM ({inner}) AS q WHERE {where_sql}");
+            return Aggregated::Count(conn.query_row(&sql, params_from_iter(params), |r| r.get::<_, i64>(0)).unwrap_or(0) as usize);
+        }
+        let has = |f: &str| columns.iter().any(|(n, _)| n == f);
+        let mut order: Vec<String> = q
+            .sort
+            .iter()
+            .filter(|k| has(&k.field))
+            .map(|k| {
+                if k.desc {
+                    format!("\"{}\" DESC NULLS LAST", k.field)
+                } else {
+                    format!("\"{}\" ASC NULLS FIRST", k.field)
+                }
+            })
+            .collect();
+        let mut tail = String::new();
+        if !order.is_empty() {
+            if has(&q.key_field) {
+                order.push(format!("\"{}\" ASC NULLS FIRST", q.key_field));
+            }
+            tail.push_str(&format!(" ORDER BY {}", order.join(", ")));
+        }
+        if let Some(limit) = q.limit {
+            tail.push_str(&format!(" LIMIT {limit}"));
+        }
+        if q.skip > 0 {
+            tail.push_str(&format!(" OFFSET {}", q.skip));
+        }
+        let sql = format!("SELECT * FROM ({inner}) AS q WHERE {where_sql}{tail}");
+        let Ok(mut stmt) = conn.prepare(&sql) else {
+            return Aggregated::Rows(vec![]);
+        };
+        let rows = stmt
+            .query_map(params_from_iter(params), |row| Ok(row_to_json(row, &columns)))
+            .map(|rows| rows.filter_map(Result::ok).collect())
+            .unwrap_or_default();
+        Aggregated::Rows(rows)
+    }
+
     fn count_blocking(&self, location: Location, filters: Vec<FieldFilter>) -> usize {
         if filters.iter().any(is_element_filter) {
             return self.get_many_blocking(location, filters, None).len();
@@ -344,7 +447,7 @@ impl DuckDbAdapter {
             ));
         }
 
-        assign_id_if_missing(&mut values, key_field);
+        assign_keys(&conn, &table, &columns, key_field, std::slice::from_mut(&mut values));
 
         let row_values = row_values_for_insert(&values, &columns);
         let sql = format!(
@@ -376,11 +479,8 @@ impl DuckDbAdapter {
             ));
         }
 
-        let mut out = Vec::with_capacity(values.len());
-        for mut v in values {
-            assign_id_if_missing(&mut v, key_field);
-            out.push(v);
-        }
+        let mut out = values;
+        assign_keys(&conn, &table, &columns, key_field, &mut out);
         // All-or-nothing, like `JsonAdapter`: a duplicate key anywhere in
         // the batch rolls the whole batch back.
         conn.execute_batch("BEGIN TRANSACTION").map_err(|e| e.to_string())?;
@@ -561,6 +661,28 @@ impl TypiQLAdapter for DuckDbAdapter {
             .unwrap_or_default()
     }
 
+    async fn aggregate(&self, spec: AggregateSpec, query: ListQuery) -> Vec<Value> {
+        if query.filters.iter().any(is_element_filter) {
+            let rows = self.get_many(spec.source.as_str().into(), Vec::new()).await;
+            let rows = spec.compute(rows).into_iter().filter(|r| matches_all(r, &query.filters)).collect();
+            return typiql_core::query::sort_and_page(rows, &query);
+        }
+        let this = self.clone();
+        match tokio::task::spawn_blocking(move || this.aggregate_blocking(spec, query, false)).await {
+            Ok(Aggregated::Rows(rows)) => rows,
+            _ => Vec::new(),
+        }
+    }
+
+    async fn aggregate_count(&self, spec: AggregateSpec, filters: Vec<FieldFilter>) -> usize {
+        let this = self.clone();
+        let query = ListQuery { filters, ..Default::default() };
+        match tokio::task::spawn_blocking(move || this.aggregate_blocking(spec, query, true)).await {
+            Ok(Aggregated::Count(n)) => n,
+            _ => 0,
+        }
+    }
+
     async fn count(&self, location: Location, filters: Vec<FieldFilter>) -> usize {
         let this = self.clone();
         tokio::task::spawn_blocking(move || this.count_blocking(location, filters))
@@ -710,18 +832,57 @@ fn select_columns_sql(columns: &[(String, String)]) -> String {
         .join(", ")
 }
 
-fn assign_id_if_missing(values: &mut Value, key_field: &str) {
-    let needs_id = values
-        .get(key_field)
-        .and_then(Value::as_str)
-        .map(str::is_empty)
-        .unwrap_or(true);
-    if needs_id {
-        if let Value::Object(map) = values {
-            map.insert(
-                key_field.to_string(),
-                Value::String(uuid::Uuid::new_v4().to_string()),
-            );
+/// Keys arrive as text (see `TypiQLType::key_json`), so an integer column
+/// also accepts a numeric string.
+fn int_of(v: &Value) -> i64 {
+    v.as_i64().or_else(|| v.as_str()?.parse().ok()).unwrap_or(0)
+}
+
+fn uint_of(v: &Value) -> u64 {
+    v.as_u64().or_else(|| v.as_str()?.parse().ok()).unwrap_or(0)
+}
+
+fn float_of(v: &Value) -> f64 {
+    v.as_f64().or_else(|| v.as_str()?.parse().ok()).unwrap_or(0.0)
+}
+
+fn is_integer_type(base: &str) -> bool {
+    matches!(
+        base,
+        "TINYINT" | "SMALLINT" | "INTEGER" | "BIGINT" | "HUGEINT" | "UTINYINT" | "USMALLINT" | "UINTEGER" | "UBIGINT" | "UHUGEINT"
+    )
+}
+
+/// Gives every row without a key one: the next number(s) for an integer key
+/// — read under the connection lock the caller holds, so concurrent adds
+/// never collide — or a UUID.
+fn assign_keys(conn: &Connection, table: &str, columns: &[(String, String)], key_field: &str, rows: &mut [Value]) {
+    let missing = |v: &Value| match v.get(key_field) {
+        None | Some(Value::Null) => true,
+        Some(Value::String(s)) => s.is_empty(),
+        _ => false,
+    };
+    if !rows.iter().any(missing) {
+        return;
+    }
+    let integer = is_integer_type(column_type(columns, key_field));
+    let mut next = if integer {
+        let stored: i64 = conn
+            .query_row(&format!("SELECT COALESCE(MAX(\"{key_field}\"), 0) FROM \"{table}\""), [], |r| r.get(0))
+            .unwrap_or(0);
+        rows.iter().filter_map(|r| r.get(key_field).and_then(Value::as_i64)).fold(stored, i64::max)
+    } else {
+        0
+    };
+    for row in rows.iter_mut().filter(|r| missing(r)) {
+        let key = if integer {
+            next += 1;
+            Value::from(next)
+        } else {
+            Value::String(uuid::Uuid::new_v4().to_string())
+        };
+        if let Value::Object(map) = row {
+            map.insert(key_field.to_string(), key);
         }
     }
 }
@@ -739,17 +900,17 @@ fn json_to_dvalue(v: &Value, base: &str) -> DValue {
             other => other.to_string(),
         }),
         "BOOLEAN" => DValue::Boolean(v.as_bool().unwrap_or(false)),
-        "DOUBLE" => DValue::Double(v.as_f64().unwrap_or(0.0)),
-        "TINYINT" => DValue::TinyInt(v.as_i64().unwrap_or(0) as i8),
-        "SMALLINT" => DValue::SmallInt(v.as_i64().unwrap_or(0) as i16),
-        "INTEGER" => DValue::Int(v.as_i64().unwrap_or(0) as i32),
-        "BIGINT" => DValue::BigInt(v.as_i64().unwrap_or(0)),
-        "HUGEINT" => DValue::HugeInt(v.as_i64().unwrap_or(0) as i128),
-        "UTINYINT" => DValue::UTinyInt(v.as_u64().unwrap_or(0) as u8),
-        "USMALLINT" => DValue::USmallInt(v.as_u64().unwrap_or(0) as u16),
-        "UINTEGER" => DValue::UInt(v.as_u64().unwrap_or(0) as u32),
-        "UBIGINT" => DValue::UBigInt(v.as_u64().unwrap_or(0)),
-        "UHUGEINT" => DValue::UHugeInt(v.as_u64().unwrap_or(0) as u128),
+        "DOUBLE" => DValue::Double(float_of(v)),
+        "TINYINT" => DValue::TinyInt(int_of(v) as i8),
+        "SMALLINT" => DValue::SmallInt(int_of(v) as i16),
+        "INTEGER" => DValue::Int(int_of(v) as i32),
+        "BIGINT" => DValue::BigInt(int_of(v)),
+        "HUGEINT" => DValue::HugeInt(int_of(v) as i128),
+        "UTINYINT" => DValue::UTinyInt(uint_of(v) as u8),
+        "USMALLINT" => DValue::USmallInt(uint_of(v) as u16),
+        "UINTEGER" => DValue::UInt(uint_of(v) as u32),
+        "UBIGINT" => DValue::UBigInt(uint_of(v)),
+        "UHUGEINT" => DValue::UHugeInt(uint_of(v) as u128),
         // "VARCHAR" and anything unrecognized: plain text, preferring the
         // value's own string form (falling back to its JSON form for a
         // scalar-mismatch, defensive against a filter value that doesn't

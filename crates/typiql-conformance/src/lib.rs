@@ -164,13 +164,59 @@ pub struct Task {
     pub created: Option<String>,
 }
 
+/// An integer key (an `INT IDENTITY` table in SQL): adapters number new rows.
+#[typiql::typiql_type]
+pub struct Counter {
+    #[typiql(key)]
+    pub id: i64,
+    pub label: String,
+}
+
+/// An aggregate type: Items grouped by owner.
+#[typiql::typiql_type(aggregate = "Item")]
+pub struct ItemSummary {
+    pub owner: Option<String>,
+    #[typiql(aggregate(count))]
+    pub items: i64,
+    #[typiql(aggregate(count = "note"))]
+    pub noted: i64,
+    #[typiql(aggregate(sum = "count"))]
+    pub total: i64,
+    #[typiql(aggregate(avg = "price"))]
+    pub avg_price: Option<f64>,
+    #[typiql(aggregate(min = "name"))]
+    pub first_name: Option<String>,
+    #[typiql(aggregate(max = "price"))]
+    pub max_price: Option<f64>,
+}
+
+/// No group fields: one row over the whole collection.
+#[typiql::typiql_type(aggregate = "Item", ops(list(name = "itemTotals")))]
+pub struct ItemTotals {
+    #[typiql(aggregate(count))]
+    pub items: i64,
+    #[typiql(aggregate(sum = "count"))]
+    pub total: i64,
+    #[typiql(aggregate(sum = "price"))]
+    pub revenue: f64,
+}
+
+/// Over a collection that stays empty.
+#[typiql::typiql_type(aggregate = "Task", ops(list(name = "taskTotals")))]
+pub struct TaskTotals {
+    #[typiql(aggregate(count))]
+    pub tasks: i64,
+    #[typiql(aggregate(sum = "title"))]
+    pub nonsense: i64,
+}
+
 /// The log type: including it in the schema turns logging on.
 #[typiql::typiql_log(adapter = "default")]
 pub struct Log;
 
 pub mod schema {
     use super::*;
-    typiql::typiql_schema!(Item, Owner, Note, Profile, Task, Log);
+    typiql::typiql_schema!(Item, Owner, Note, Profile, Task, Counter, ItemSummary, ItemTotals, TaskTotals, Log);
     pub type Schema = async_graphql::Schema<TypiQLQuery, TypiQLMutation, TypiQLSubscription>;
 }
 
@@ -231,6 +277,101 @@ fn store(default: (Arc<dyn TypiQLAdapter>, tempfile::TempDir), secondary: Option
         adapters,
         keep_alive: Box::new((default.1, secondary_dir)),
     }
+}
+
+/// The SQL Server test server, from `TYPIQL_TEST_MSSQL` (an ADO.NET-style
+/// connection string without a database). Each store gets its own new
+/// database, so tests never see each other's rows.
+fn mssql_adapter() -> (Arc<dyn TypiQLAdapter>, Box<dyn Any + Send>) {
+    let conn = std::env::var("TYPIQL_TEST_MSSQL").expect("TYPIQL_TEST_MSSQL is set (see conformance_suite!'s `requires`)");
+    let database = format!("typiql_test_{}", uuid::Uuid::new_v4().simple());
+    let adapter = typiql_adapter_mssql::MssqlAdapter::with_database(&conn, &database, true).unwrap();
+    (Arc::new(adapter), Box::new(DropDatabase { conn, database }))
+}
+
+/// Drops a test's SQL Server database when its harness goes away, so a run
+/// doesn't leave hundreds behind (the test server has little memory).
+struct DropDatabase {
+    conn: String,
+    database: String,
+}
+
+impl Drop for DropDatabase {
+    fn drop(&mut self) {
+        let (conn, database) = (self.conn.clone(), self.database.clone());
+        // Drop can't await; do it on a thread with its own small runtime.
+        let _ = std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+            if let Err(e) = rt.block_on(typiql_adapter_mssql::MssqlAdapter::drop_database(&conn, &database)) {
+                eprintln!("couldn't drop test database {database}: {e}");
+            }
+        })
+        .join();
+    }
+}
+
+/// Everything on SQL Server.
+pub fn mssql_store() -> Store {
+    let (adapter, keep) = mssql_adapter();
+    let mut adapters: AdapterMap = HashMap::new();
+    adapters.insert("default", adapter.clone());
+    adapters.insert("secondary", adapter);
+    Store { adapters, keep_alive: keep }
+}
+
+/// `Item`/`Note` on SQL Server, `Owner` on JSON.
+pub fn mssql_then_json_store() -> Store {
+    let (adapter, keep) = mssql_adapter();
+    let (json, dir) = json_adapter();
+    let mut adapters: AdapterMap = HashMap::new();
+    adapters.insert("default", adapter);
+    adapters.insert("secondary", json);
+    Store { adapters, keep_alive: Box::new((keep, dir)) }
+}
+
+fn mongo_adapter() -> (Arc<dyn TypiQLAdapter>, Box<dyn Any + Send>) {
+    let uri = std::env::var("TYPIQL_TEST_MONGO").expect("TYPIQL_TEST_MONGO is set (see conformance_suite!'s `requires`)");
+    let database = format!("typiql_test_{}", uuid::Uuid::new_v4().simple());
+    let adapter = typiql_adapter_mongo::MongoAdapter::new(&uri, &database);
+    (Arc::new(adapter), Box::new(DropMongoDatabase { uri, database }))
+}
+
+/// Drops a test's Mongo database when its harness goes away.
+struct DropMongoDatabase {
+    uri: String,
+    database: String,
+}
+
+impl Drop for DropMongoDatabase {
+    fn drop(&mut self) {
+        let (uri, database) = (self.uri.clone(), self.database.clone());
+        let _ = std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+            if let Err(e) = rt.block_on(typiql_adapter_mongo::MongoAdapter::drop_database(&uri, &database)) {
+                eprintln!("couldn't drop test database {database}: {e}");
+            }
+        })
+        .join();
+    }
+}
+
+/// Everything on MongoDB.
+pub fn mongo_store() -> Store {
+    let (adapter, keep) = mongo_adapter();
+    let mut adapters: AdapterMap = HashMap::new();
+    adapters.insert("default", adapter.clone());
+    adapters.insert("secondary", adapter);
+    Store { adapters, keep_alive: keep }
+}
+
+/// `Item`/`Note` on MongoDB, `Owner` on JSON.
+pub fn mongo_then_json_store() -> Store {
+    let (adapter, keep) = mongo_adapter();
+    let (json, dir) = json_adapter();
+    let mut adapters: AdapterMap = HashMap::new();
+    adapters.insert("default", adapter);
+    adapters.insert("secondary", json);
+    Store { adapters, keep_alive: Box::new((keep, dir)) }
 }
 
 /// Everything on the JSON adapter.
@@ -1010,6 +1151,88 @@ pub mod cases {
         assert!(info["getLogsPageInfo"]["totalResults"].as_i64().unwrap() >= 2);
     }
 
+    /// Integer keys: new rows are numbered by the adapter; get/update/remove
+    /// by number; a keyed upsert creates that number, and numbering carries
+    /// on after it; duplicates are refused.
+    pub async fn integer_keys(h: &Harness) {
+        let mut ids = Vec::new();
+        for label in ["a", "b", "c"] {
+            let added = h.run(&format!(r#"mutation {{ addCounter(values: {{ label: "{label}" }}) {{ id label }} }}"#)).await;
+            ids.push(added["addCounter"]["id"].as_i64().expect("an integer key"));
+        }
+        assert!(ids.windows(2).all(|w| w[1] > w[0]), "increasing: {ids:?}");
+        let (b, c) = (ids[1], ids[2]);
+
+        assert_eq!(h.run(&format!("{{ getCounter(id: {b}) {{ label }} }}")).await["getCounter"]["label"], "b");
+        assert_eq!(h.run(&format!("{{ getCounters(id_gt: {}) {{ id }} }}", ids[0])).await["getCounters"].as_array().unwrap().len(), 2);
+        let updated = h.run(&format!(r#"mutation {{ updateCounter(id: {b}, update: {{ label: "B" }}) {{ id label }} }}"#)).await;
+        assert_eq!(updated["updateCounter"], json!({ "id": b, "label": "B" }));
+        assert_eq!(h.run(&format!("mutation {{ removeCounter(id: {c}) {{ id }} }}")).await["removeCounter"]["id"], c);
+        assert_eq!(h.run(&format!("{{ getCounter(id: {c}) {{ id }} }}")).await["getCounter"], Value::Null);
+
+        let explicit = h.run(r#"mutation { updateCounter(id: 100, update: { label: "hundred" }, _upsert: true) { id label } }"#).await;
+        assert_eq!(explicit["updateCounter"], json!({ "id": 100, "label": "hundred" }));
+        let after = h.run(r#"mutation { addCounter(values: { label: "next" }) { id } }"#).await;
+        assert!(after["addCounter"]["id"].as_i64().unwrap() > 100, "{after}");
+
+        let err = h.adapters["default"]
+            .add(typiql::Location::from("counters"), "id", json!({ "id": 100, "label": "again" }))
+            .await
+            .unwrap_err();
+        assert!(err.starts_with("Duplicate key"), "{err}");
+        assert_eq!(h.run("{ getCounter(id: 100) { label } }").await["getCounter"]["label"], "hundred");
+    }
+
+    /// Aggregate types: groups (missing values form their own group), every
+    /// function — sum of nothing is 0, avg/min/max of nothing null — then
+    /// filters, sorting and paging over the groups. An empty source has no
+    /// rows at all, as with Mongo's `$group`.
+    pub async fn aggregates(h: &Harness) {
+        let ids = h.seed().await;
+        let (o1, o2) = (ids["o1"].clone(), ids["o2"].clone());
+        let fields = "owner items noted total avgPrice firstName maxPrice";
+        let rows = h.run(&format!("{{ getItemSummaries {{ {fields} }} }}")).await["getItemSummaries"].clone();
+        let mut by_owner: HashMap<String, Value> = rows
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| (r["owner"].as_str().unwrap_or("none").to_string(), r.clone()))
+            .collect();
+        assert_eq!(by_owner.len(), 3, "{rows}");
+        assert_eq!(
+            by_owner.remove(&o1).unwrap(),
+            json!({ "owner": o1, "items": 2, "noted": 1, "total": 3, "avgPrice": 2.0, "firstName": "Alpha", "maxPrice": 2.5 })
+        );
+        assert_eq!(
+            by_owner.remove(&o2).unwrap(),
+            json!({ "owner": o2, "items": 1, "noted": 1, "total": 3, "avgPrice": 3.5, "firstName": "Gamma", "maxPrice": 3.5 })
+        );
+        assert_eq!(
+            by_owner.remove("none").unwrap(),
+            json!({ "owner": null, "items": 1, "noted": 0, "total": 4, "avgPrice": 4.5, "firstName": "alphabet_50%", "maxPrice": 4.5 })
+        );
+
+        // Filters, sorting and paging apply to the groups.
+        let owners = |args: &'static str| async move {
+            h.run(&format!("{{ getItemSummaries({args}) {{ owner }} }}")).await["getItemSummaries"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|r| r["owner"].as_str().map(str::to_string))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(owners("items_gte: 2").await, [Some(o1.clone())]);
+        assert_eq!(owners(r#"_orderBy_desc: "avgPrice""#).await, [None, Some(o2.clone()), Some(o1.clone())]);
+        assert_eq!(owners(r#"_orderBy: "avgPrice", _start: 1, _limit: 1"#).await, [Some(o2.clone())]);
+        let info = h.run("{ getItemSummariesPageInfo(total: 3) { totalResults } }").await;
+        assert_eq!(info["getItemSummariesPageInfo"]["totalResults"], 2);
+
+        let totals = h.run("{ itemTotals { items total revenue } }").await;
+        assert_eq!(totals["itemTotals"], json!([{ "items": 4, "total": 10, "revenue": 12.0 }]));
+        let empty = h.run("{ taskTotals { tasks nonsense } taskTotalsPageInfo { totalResults } }").await;
+        assert_eq!(empty, json!({ "taskTotals": [], "taskTotalsPageInfo": { "totalResults": 0 } }));
+    }
+
     pub async fn scope_set_and_roles(h: &Harness) {
         let (alice, bob) = (user("alice"), user("bob"));
         let add = |body: &str| format!(r#"mutation {{ addNote(values: {{ body: "{body}", owner: "mallory" }}) {{ id owner created }} }}"#);
@@ -1043,11 +1266,16 @@ pub mod cases {
 }
 
 /// Generates one `#[tokio::test]` per case, each against a fresh store from
-/// `$store` (a `fn() -> Store`).
+/// `$store` (a `fn() -> Store`). With `requires = "ENV"`, each test is
+/// skipped (with a note) unless that environment variable is set — for
+/// adapters that need a running server.
 #[macro_export]
 macro_rules! conformance_suite {
     ($store:path) => {
-        $crate::conformance_suite!(@cases $store;
+        $crate::conformance_suite!($store, requires = "");
+    };
+    ($store:path, requires = $env:literal) => {
+        $crate::conformance_suite!(@cases $store, $env;
             add_then_read_back,
             update_patches_only_what_was_sent,
             remove_deletes_one,
@@ -1061,6 +1289,8 @@ macro_rules! conformance_suite {
             sorting,
             paging,
             upsert,
+            integer_keys,
+            aggregates,
             bulk_operations,
             logging,
             concurrent_writes_are_all_kept,
@@ -1068,11 +1298,15 @@ macro_rules! conformance_suite {
             scope_set_and_roles,
         );
     };
-    (@cases $store:path; $($case:ident),* $(,)?) => {
+    (@cases $store:path, $env:literal; $($case:ident),* $(,)?) => {
         $(
             // Multi-threaded, so concurrency cases really run in parallel.
             #[::tokio::test(flavor = "multi_thread", worker_threads = 4)]
             async fn $case() {
+                if !$env.is_empty() && ::std::env::var($env).is_err() {
+                    eprintln!("skipped: set {} to run against that server", $env);
+                    return;
+                }
                 let harness = $crate::Harness::new($store());
                 $crate::cases::$case(&harness).await;
             }

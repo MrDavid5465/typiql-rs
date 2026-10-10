@@ -15,8 +15,8 @@ pub use auth::{check_roles, resolve_value, with_user, CurrentUser, TypiQLUser};
 pub use join_cache::{JoinCache, JoinCacheExtension};
 pub use log::{enable_logging, log_success, ErrorLogExtension, LogEntry, LogSink, StoreLogger, TypiQLLogger};
 pub use query::{
-    is_element_filter, list_query, ElementAt, ElementMatch, Join, JoinCondition, JoinValue, ListQuery,
-    PageInfo, SortKey,
+    is_element_filter, list_query, AggregateFn, AggregateSpec, ElementAt, ElementMatch, Join,
+    JoinCondition, JoinValue, ListQuery, Measure, PageInfo, SortKey,
 };
 pub use resolver::{
     matches_scope, resolve_add, resolve_add_many, resolve_add_with, resolve_list, resolve_page_info,
@@ -55,6 +55,18 @@ pub trait TypiQLType: for<'de> Deserialize<'de> + Serialize + Send + Sync + 'sta
     /// The key field's storage name (its `data_name`, if it has one).
     fn key_field() -> &'static str;
 
+    /// A key, as adapters pass keys around (text), in the JSON form its
+    /// rows store it in — a number for an integer key.
+    fn key_json(key: &str) -> serde_json::Value {
+        serde_json::Value::String(key.to_string())
+    }
+
+    /// A stand-in key of the key's type, for completing a new row whose key
+    /// the adapter will assign (`""`, or `0` for an integer key).
+    fn key_placeholder() -> serde_json::Value {
+        serde_json::Value::String(String::new())
+    }
+
     /// A field's storage name, from its Rust/GraphQL name — `data_name` if
     /// the field declares one, else the name unchanged. Lets code outside
     /// this type (a relation naming this type's `foreign` field) address the
@@ -89,6 +101,19 @@ pub trait TypiQLType: for<'de> Deserialize<'de> + Serialize + Send + Sync + 'sta
     /// `typiql_schema!` turns logging on, stored in it.
     fn is_log_store() -> bool {
         false
+    }
+
+    /// The stored procedure serving this type, and its parameters (the key
+    /// fields' storage names, in order) — `#[typiql_type(procedure = "…")]`.
+    fn procedure() -> Option<(&'static str, &'static [&'static str])> {
+        None
+    }
+
+    /// For an aggregate type (`#[typiql_type(aggregate = "Source")]`): what
+    /// it groups and computes over its source. Such a type has no storage
+    /// of its own.
+    fn aggregate() -> Option<AggregateSpec> {
+        None
     }
     fn collection_name() -> &'static str;
 

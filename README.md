@@ -24,11 +24,27 @@ where it's the backend data layer.
 
 - **typiql-adapter-duckdb** — a `TypiQLAdapter` backed by DuckDB, for
   columnar/analytical data.
+- **typiql-adapter-mssql** — a `TypiQLAdapter` backed by SQL Server (the
+  port of the original C# typiql's SQL adapter). As there, a `data_name`
+  can be a column or a SQL expression; tables are created if missing.
+- **typiql-adapter-mongo** — a `TypiQLAdapter` backed by MongoDB (the port
+  of the original C# typiql's Mongo adapter, whose semantics are the
+  reference for every adapter). Reads are aggregation pipelines, join-mode
+  relations are `$lookup`s. As in C#, a key stored as `_id` is an
+  `ObjectId`, read and matched as its hex string; any other key gets a
+  unique index. GridFS file types aren't ported.
+- **typiql-adapter-ldap** — a `TypiQLAdapter` backed by an LDAP directory,
+  Active Directory included (the port of the original C# typiql's AD
+  adapter). See [Directory types](#directory-types-ldap--active-directory).
 - **typiql-conformance** (unpublished) — runs one GraphQL-only test suite
   against every adapter, alone and mixed. Which adapter serves a type is
   backend configuration; clients must not be able to tell the difference.
   Where adapters could disagree (e.g. filters over null values), the
-  original C# Mongo adapter's semantics are the reference.
+  original C# Mongo adapter's semantics are the reference. Adapters that need a
+  server run when it's configured, e.g.
+  `TYPIQL_TEST_MSSQL="server=tcp:127.0.0.1,1433;user=sa;password=…;TrustServerCertificate=true"`
+  or `TYPIQL_TEST_MONGO="mongodb://127.0.0.1:27017"`, or
+  `TYPIQL_TEST_LDAP="ldap://127.0.0.1:389|<base DN>|<bind DN>|<password>"`.
 
 ## Usage
 
@@ -188,7 +204,110 @@ key rejects the batch), `updateTasks(<filters>, update: TaskInput!)` and
 change event per row. A bulk update or remove with no filter and no scope
 is refused rather than applied to every row.
 
-### Logging
+### Integer keys
+
+A key field may be an integer instead of a `String`. On every adapter,
+`add` without a key assigns the next one (max + 1; `IDENTITY` on SQL
+Server), and `get`/`update`/`remove` take the key as an `Int`:
+
+```rust
+#[typiql_type]
+pub struct Counter {
+    #[typiql(key)]
+    pub id: i64,
+    pub label: String,
+}
+```
+
+### Aggregate types
+
+A read-only type computed from another type's rows, grouped by its plain
+fields (none: one row over the whole source, or no row if it's empty):
+
+```rust
+#[typiql_type(aggregate = "Item")]
+pub struct ItemSummary {
+    pub owner: Option<String>,       // group by Item.owner
+    #[typiql(aggregate(count))]
+    pub items: i64,
+    #[typiql(aggregate(sum = "price"))]
+    pub total: f64,
+    #[typiql(aggregate(avg = "price"))]
+    pub average: Option<f64>,
+    #[typiql(aggregate(max = "price"))]
+    pub highest: Option<f64>,
+}
+```
+
+`count`, `count = "field"` (non-null values), `sum`, `avg`, `min`, `max`.
+It gets `get`/`list` (with filters, sorting, paging and PageInfo over the
+aggregated rows) and uses the source's adapter. DuckDB and SQL Server run
+it as `GROUP BY`, MongoDB as `$group`; the JSON adapter computes it in memory. As in Mongo, a sum
+of nothing is 0 and `avg`/`min`/`max` of nothing are null.
+
+### Stored procedures (SQL Server)
+
+As in C#, a type can be served by a stored procedure instead of a table.
+Its key fields are the procedure's parameters, in order, taken from the
+query's equality filters (missing ones are passed as `NULL`). As in C#,
+other filters, sorting and paging don't apply — the procedure's result is
+returned as is:
+
+```rust
+#[typiql_type(adapter = "sql", procedure = "dbo.SalesByRegion", ops(get, list))]
+pub struct SalesSummary {
+    #[typiql(key)]
+    pub region: String,
+    #[typiql(key)]
+    pub year: i64,
+    pub total: f64,
+}
+```
+
+Several `#[typiql(key)]` fields are allowed only on procedure types. They
+are read-only; other adapters ignore `procedure`.
+
+### Directory types (LDAP / Active Directory)
+
+Each type is a class of directory entries, configured on the adapter — the
+LDAP filter that selects them (C#'s model name), where they live, and, for
+types that can be added to, how new entries are named:
+
+```rust
+let ad = LdapAdapter::new("ldaps://dc1.corp.example", "DC=corp,DC=example",
+        Bind::Simple { dn: "svc-typiql@corp.example".into(), password })
+    .class("users", LdapClass::new("(&(objectCategory=person)(objectClass=user))"))
+    .class("groups", LdapClass::new("(objectClass=group)"));
+
+#[typiql_type(adapter = "ad", ops(get, list, update))]
+pub struct User {
+    #[typiql(key, data_name = "sAMAccountName")]
+    pub username: String,
+    #[typiql(data_name = "displayName")]
+    pub name: Option<String>,
+    #[typiql(data_name = "memberOf")]
+    pub groups: Vec<String>,          // multi-valued: every value
+    #[typiql(data_name = "objectSid")]
+    pub sid: Option<String>,          // S-1-5-21-…
+    #[typiql(data_name = "thumbnailPhoto")]
+    pub photo: Option<String>,        // base64; stored as a JPEG ≤ 512px
+    pub dn: Option<String>,           // the entry's DN
+}
+```
+
+- A field's `data_name` is its attribute; `dn` is the entry's DN.
+- Equality, `in` and the pattern operators are LDAP filters, so they
+  follow the directory's matching rules. For most AD attributes that's
+  case-insensitive, as in C#.
+- Text ordering, list-element filters, sorting and paging run in memory.
+- Searches are paged, and ranged attributes (`member;range=…`) are read in
+  full.
+- A list field's values are a set: their order isn't kept.
+- Writing `""` or null removes an attribute.
+- `LdapClass::creatable(rdn, object_classes)` allows `add`. Clients then
+  give the naming attribute, so mark the key `#[typiql(key, input)]`.
+- Kerberos (integrated) binds need the `gssapi` feature.
+
 
 Including a log type in the schema turns logging on; its rows are stored
 through the adapter it names and are queryable like any other type:

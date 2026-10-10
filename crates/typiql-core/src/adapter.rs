@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use serde_json::Value;
 
-use crate::query::{sort_and_page, ListQuery};
+use crate::query::{matches_all, sort_and_page, AggregateSpec, ListQuery};
 
 /// The in-memory implementation of [`TypiQLAdapter::query`]: filter via
 /// `get_many`, attach each join's related rows (fetched from this same
@@ -110,6 +110,21 @@ pub trait TypiQLAdapter: Send + Sync {
     /// can push this into their store should, with identical results.
     async fn query(&self, location: Location, query: ListQuery) -> Vec<Value> {
         query_in_memory(self, location, query).await
+    }
+
+    /// An aggregate type's rows (see [`AggregateSpec`]), then `query`'s
+    /// filters, sorting and paging applied to them. The default groups the
+    /// source's rows in memory; SQL adapters push it into `GROUP BY`.
+    async fn aggregate(&self, spec: AggregateSpec, query: ListQuery) -> Vec<Value> {
+        let rows = self.get_many(spec.source.as_str().into(), Vec::new()).await;
+        let rows: Vec<Value> = spec.compute(rows).into_iter().filter(|r| matches_all(r, &query.filters)).collect();
+        sort_and_page(rows, &query)
+    }
+
+    /// How many rows an aggregate type has after `filters`.
+    async fn aggregate_count(&self, spec: AggregateSpec, filters: Vec<FieldFilter>) -> usize {
+        let query = ListQuery { filters, ..Default::default() };
+        self.aggregate(spec, query).await.len()
     }
 
     /// How many rows match — for `<list>PageInfo`. The default counts
@@ -224,4 +239,12 @@ pub trait TypiQLAdapter: Send + Sync {
         _columns: &[(&'static str, &'static str)],
     ) {
     }
+
+    /// Called after `register_type` for a type declared with
+    /// `#[typiql_type(procedure = "...")]` (C#'s stored-procedure model): its
+    /// rows come from running `procedure` with `params` (the key fields'
+    /// storage names, in order), and it's read-only. Only meaningful to a
+    /// SQL adapter; the default ignores it, so elsewhere the type is an
+    /// ordinary table.
+    fn register_procedure(&self, _table: &str, _procedure: &str, _params: &[&'static str]) {}
 }

@@ -401,6 +401,12 @@ struct FieldInfo {
     elements: bool,
     /// `#[typiql(log)]` on a relation field: log its successful resolutions.
     log: bool,
+    /// `#[typiql(key, input)]`: clients give the key when adding (e.g. a
+    /// directory entry's name) rather than the adapter assigning it.
+    key_input: bool,
+    /// `#[typiql(aggregate(sum = "field"))]` on an aggregate type's field:
+    /// the `AggregateFn` variant and the source field (Rust name).
+    aggregate: Option<(&'static str, Option<String>)>,
     other_attrs: Vec<syn::Attribute>,
 }
 
@@ -428,6 +434,8 @@ fn parse_field_info(f: &syn::Field) -> syn::Result<FieldInfo> {
     let mut file_table_relation: Option<FileTableRelation> = None;
     let mut elements = false;
     let mut log = false;
+    let mut key_input = false;
+    let mut aggregate: Option<(&'static str, Option<String>)> = None;
     let mut other_attrs = Vec::new();
 
     for attr in &f.attrs {
@@ -438,8 +446,31 @@ fn parse_field_info(f: &syn::Field) -> syn::Result<FieldInfo> {
         attr.parse_nested_meta(|meta| {
             if meta.path.is_ident("key") {
                 is_key = true;
+            } else if meta.path.is_ident("input") {
+                key_input = true;
             } else if meta.path.is_ident("log") {
                 log = true;
+            } else if meta.path.is_ident("aggregate") {
+                meta.parse_nested_meta(|inner| {
+                    let func = [("count", "Count"), ("sum", "Sum"), ("avg", "Avg"), ("min", "Min"), ("max", "Max")]
+                        .into_iter()
+                        .find(|(k, _)| inner.path.is_ident(k))
+                        .map(|(_, v)| v)
+                        .ok_or_else(|| inner.error("expected count, sum, avg, min or max"))?;
+                    let field = if inner.input.peek(Token![=]) {
+                        Some(inner.value()?.parse::<LitStr>()?.value())
+                    } else {
+                        None
+                    };
+                    let func = match (func, &field) {
+                        ("Count", Some(_)) => "CountOf",
+                        ("Count", None) => "Count",
+                        (_, None) => return Err(inner.error("name the source field: `sum = \"field\"`")),
+                        (f, Some(_)) => f,
+                    };
+                    aggregate = Some((func, field));
+                    Ok(())
+                })?;
             } else if meta.path.is_ident("elements") {
                 if !is_vec_type(unwrap_option(&ty)) {
                     return Err(meta.error("`elements` needs a `Vec<T>` field whose `T` derives `TypiQLElement`"));
@@ -524,6 +555,9 @@ fn parse_field_info(f: &syn::Field) -> syn::Result<FieldInfo> {
         })?;
     }
 
+    if key_input && !is_key {
+        return Err(syn::Error::new_spanned(&ident, "`input` goes with `key`: `#[typiql(key, input)]`"));
+    }
     if log && relations.is_empty() && file_table_relation.is_none() {
         return Err(syn::Error::new_spanned(
             &ident,
@@ -549,6 +583,8 @@ fn parse_field_info(f: &syn::Field) -> syn::Result<FieldInfo> {
         file_table_relation,
         elements,
         log,
+        key_input,
+        aggregate,
         other_attrs,
     })
 }
@@ -933,11 +969,17 @@ pub fn typiql_type(attr: TokenStream, item: TokenStream) -> TokenStream {
     let mut ops_attr: Option<Vec<OpDecl>> = None;
     let mut log_all = false;
     let mut is_log_store = false;
+    let mut procedure: Option<LitStr> = None;
+    let mut aggregate_of: Option<syn::Path> = None;
     let attr_parser = syn::meta::parser(|meta| {
         if meta.path.is_ident("no_location") {
             is_dumb = true;
         } else if meta.path.is_ident("log") {
             log_all = true;
+        } else if meta.path.is_ident("procedure") {
+            procedure = Some(meta.value()?.parse()?);
+        } else if meta.path.is_ident("aggregate") {
+            aggregate_of = Some(meta.value()?.parse::<LitStr>()?.parse()?);
         } else if meta.path.is_ident("__log_store") {
             is_log_store = true;
         } else if meta.path.is_ident("adapter") {
@@ -952,6 +994,7 @@ pub fn typiql_type(attr: TokenStream, item: TokenStream) -> TokenStream {
         Ok(())
     });
     parse_macro_input!(attr with attr_parser);
+    let adapter_attr_given = adapter_attr.is_some();
     let adapter_str = adapter_attr.unwrap_or_else(|| "default".to_string());
 
     let input = parse_macro_input!(item as DeriveInput);
@@ -995,6 +1038,61 @@ pub fn typiql_type(attr: TokenStream, item: TokenStream) -> TokenStream {
     // only ever reached for a dumb type with none marked, or hypothetically
     // a non-dumb type that forgot to (preserving today's exact behavior).
     let key_idx = field_infos.iter().position(|fi| fi.is_key);
+    // A stored procedure's parameters are its key fields, in order (C#'s
+    // Model.Key list); anywhere else there's exactly one key.
+    let key_fields: Vec<&FieldInfo> = field_infos.iter().filter(|fi| fi.is_key).collect();
+    if procedure.is_none() {
+        if let Some(extra) = key_fields.get(1) {
+            return syn::Error::new_spanned(
+                &extra.ident,
+                "a type has one key field (several are only for a stored procedure's parameters)",
+            )
+            .to_compile_error()
+            .into();
+        }
+    }
+    // Aggregate types: read-only rows grouped over a source type.
+    if aggregate_of.is_none() {
+        if let Some(fi) = field_infos.iter().find(|fi| fi.aggregate.is_some()) {
+            return syn::Error::new_spanned(&fi.ident, "`aggregate(...)` fields belong to an aggregate type: `#[typiql_type(aggregate = \"Source\")]`")
+                .to_compile_error()
+                .into();
+        }
+    }
+    let aggregate_fn = aggregate_of.as_ref().map(|source| {
+        let groups = field_infos.iter().filter(|fi| fi.aggregate.is_none() && !fi.is_relation()).map(|fi| {
+            let out = fi.storage_name();
+            let src = fi.ident.to_string();
+            quote! { (#out.to_string(), <#source as ::typiql::TypiQLType>::data_name(#src).to_string()) }
+        });
+        let measures = field_infos.iter().filter_map(|fi| {
+            let (func, field) = fi.aggregate.as_ref()?;
+            let out = fi.storage_name();
+            let func = format_ident!("{}", func);
+            let field = match field {
+                Some(f) => quote! { ::std::option::Option::Some(<#source as ::typiql::TypiQLType>::data_name(#f).to_string()) },
+                None => quote! { ::std::option::Option::None },
+            };
+            Some(quote! { ::typiql::Measure { name: #out.to_string(), func: ::typiql::AggregateFn::#func, field: #field } })
+        });
+        quote! {
+            fn aggregate() -> ::std::option::Option<::typiql::AggregateSpec> {
+                ::std::option::Option::Some(::typiql::AggregateSpec {
+                    source: <#source as ::typiql::TypiQLType>::collection_name().to_string(),
+                    groups: ::std::vec![#(#groups),*],
+                    measures: ::std::vec![#(#measures),*],
+                })
+            }
+        }
+    });
+    let procedure_fn = procedure.as_ref().map(|p| {
+        let params: Vec<String> = key_fields.iter().map(|fi| fi.storage_name()).collect();
+        quote! {
+            fn procedure() -> ::std::option::Option<(&'static str, &'static [&'static str])> {
+                ::std::option::Option::Some((#p, &[#(#params),*]))
+            }
+        }
+    });
 
     let has_relations = field_infos.iter().any(|fi| fi.is_relation());
 
@@ -1027,9 +1125,9 @@ pub fn typiql_type(attr: TokenStream, item: TokenStream) -> TokenStream {
         })
         .collect();
 
-    let non_key: Vec<&FieldInfo> = field_infos
+    let input_infos: Vec<&FieldInfo> = field_infos
         .iter()
-        .filter(|fi| !fi.is_key && !fi.is_relation())
+        .filter(|fi| (!fi.is_key || fi.key_input) && !fi.is_relation())
         .collect();
 
     // Every Input field is `MaybeUndefined<T>` (not `Option<T>`) — a
@@ -1048,7 +1146,7 @@ pub fn typiql_type(attr: TokenStream, item: TokenStream) -> TokenStream {
     // `unwrap_option` strips one Option layer first so a field already
     // declared `Option<String>` on the entity becomes `MaybeUndefined<String>`
     // on Input, not a double-wrapped `MaybeUndefined<Option<String>>`.
-    let input_fields: Vec<TokenStream2> = non_key.iter().map(|fi| {
+    let input_fields: Vec<TokenStream2> = input_infos.iter().map(|fi| {
         let ident = &fi.ident;
         let inner_ty = unwrap_option(&fi.ty);
         // Same rename as the struct itself, so what the client sends is
@@ -1061,9 +1159,9 @@ pub fn typiql_type(attr: TokenStream, item: TokenStream) -> TokenStream {
         }
     }).collect();
 
-    // Same field set as `non_key`, but with the key field included — used
-    // for filter-argument generation only (Input generation still excludes
-    // the key, unaffected). Shared by both the list query and the get-one
+    // Every non-relation field, key included — used for filter-argument
+    // generation (Input includes the key only with `#[typiql(key, input)]`).
+    // Shared by both the list query and the get-one
     // query, which is filter-based like the list query rather than an
     // exact-key-only lookup (get_fn below).
     let filterable: Vec<&FieldInfo> = field_infos.iter().filter(|fi| !fi.is_relation()).collect();
@@ -1118,8 +1216,21 @@ pub fn typiql_type(attr: TokenStream, item: TokenStream) -> TokenStream {
     // behavior. Declaring it generates only what's listed: an operation left
     // out doesn't exist in the schema, rather than existing and being
     // refused at runtime (as a C# type only had its configured functions).
-    let ops: Vec<OpDecl> =
-        ops_attr.unwrap_or_else(|| OpKind::DEFAULT.into_iter().map(OpDecl::plain).collect());
+    let ops: Vec<OpDecl> = ops_attr.unwrap_or_else(|| {
+        // An aggregate type is read-only.
+        let kinds: &[OpKind] = if aggregate_of.is_some() { &[OpKind::Get, OpKind::List] } else { &OpKind::DEFAULT };
+        kinds.iter().copied().map(OpDecl::plain).collect()
+    });
+    if aggregate_of.is_some() {
+        if let Some(op) = ops.iter().find(|op| !matches!(op.kind, OpKind::Get | OpKind::List)) {
+            return syn::Error::new_spanned(
+                name,
+                format!("an aggregate type is read-only: `{}` isn't available", op.kind.keyword()),
+            )
+            .to_compile_error()
+            .into();
+        }
+    }
 
     // Every field an operation names must be a plain field of this struct —
     // a typo or a relation field is a compile error here, not a silently
@@ -1657,6 +1768,20 @@ pub fn typiql_type(attr: TokenStream, item: TokenStream) -> TokenStream {
             }
         });
         let key_field_ident = &field_infos[key_idx.unwrap_or(0)].ident;
+        // The key's own type: `String`, or an integer (`INT IDENTITY` tables).
+        let key_ty = unwrap_option(&field_infos[key_idx.unwrap_or(0)].ty);
+        let key_is_int = matches!(
+            scalar_type_name(key_ty).as_deref(),
+            Some("i8" | "i16" | "i32" | "i64" | "isize" | "u8" | "u16" | "u32" | "u64" | "usize")
+        );
+        let key_json_fns = key_is_int.then(|| quote! {
+            fn key_json(key: &str) -> ::serde_json::Value {
+                key.parse::<i64>().map(::serde_json::Value::from).unwrap_or_else(|_| ::serde_json::Value::String(key.to_string()))
+            }
+            fn key_placeholder() -> ::serde_json::Value {
+                ::serde_json::Value::from(0)
+            }
+        });
 
         let query_struct        = format_ident!("{}Query",        name);
         let mutation_struct     = format_ident!("{}Mutation",     name);
@@ -1670,9 +1795,15 @@ pub fn typiql_type(attr: TokenStream, item: TokenStream) -> TokenStream {
         let remove_fn     = format_ident!("remove_{}", &name_snake);
         let changed_fn    = format_ident!("{}_changed", &name_snake);
 
-        let adapter_name_fn = (adapter_str != "default").then(|| {
-            quote! { fn adapter_name() -> &'static str { #adapter_str } }
-        });
+        let adapter_name_fn = match (&aggregate_of, adapter_attr_given) {
+            // An aggregate type is served by its source's adapter.
+            (Some(source), false) => Some(quote! {
+                fn adapter_name() -> &'static str { <#source as ::typiql::TypiQLType>::adapter_name() }
+            }),
+            _ => (adapter_str != "default").then(|| {
+                quote! { fn adapter_name() -> &'static str { #adapter_str } }
+            }),
+        };
         let duckdb_columns_fn = quote! {
             fn duckdb_columns() -> &'static [(&'static str, &'static str)] {
                 &[ #(#duckdb_column_entries),* ]
@@ -1898,12 +2029,12 @@ pub fn typiql_type(attr: TokenStream, item: TokenStream) -> TokenStream {
                     // `by(...)` fields (all equality).
                     let (identify_args, identify_pushes, by_key) = match &op.by {
                         None => (
-                            quote! { #key_field_ident: ::std::string::String, },
+                            quote! { #key_field_ident: #key_ty, },
                             quote! {
                                 __identify.push(::typiql::FieldFilter {
                                     field: #key_field_str.to_string(),
                                     op: ::typiql::FilterOp::Eq,
-                                    value: ::serde_json::Value::String(#key_field_ident.clone()),
+                                    value: ::serde_json::to_value(&#key_field_ident)?,
                                 });
                             },
                             true,
@@ -1951,7 +2082,7 @@ pub fn typiql_type(attr: TokenStream, item: TokenStream) -> TokenStream {
                                 #identify_pushes
                                 ::typiql::resolve_upsert::<#name>(ctx, __identify, update, __scope, __set, true).await?
                             } else {
-                                ::typiql::resolve_update_with::<#name>(ctx, #key_field_ident, update, __scope, __set).await?
+                                ::typiql::resolve_update_with::<#name>(ctx, #key_field_ident.to_string(), update, __scope, __set).await?
                             }
                         }
                     } else {
@@ -2012,7 +2143,7 @@ pub fn typiql_type(attr: TokenStream, item: TokenStream) -> TokenStream {
                         async fn #fn_ident(
                             &self,
                             ctx: &::async_graphql::Context<'_>,
-                            #key_field_ident: ::std::string::String,
+                            #key_field_ident: #key_ty,
                         ) -> ::async_graphql::Result<::std::option::Option<#name>> {
                             let __started = ::std::time::Instant::now();
 
@@ -2022,7 +2153,7 @@ pub fn typiql_type(attr: TokenStream, item: TokenStream) -> TokenStream {
                             #[allow(unused_mut)]
                             let mut __scope: ::std::vec::Vec<::typiql::FieldFilter> = ::std::vec::Vec::new();
                             #(#scope)*
-                            let __item = ::typiql::resolve_remove_with::<#name>(ctx, #key_field_ident, __scope).await?;
+                            let __item = ::typiql::resolve_remove_with::<#name>(ctx, #key_field_ident.to_string(), __scope).await?;
                             if let ::std::option::Option::Some(ref __v) = __item {
                                 ::typiql::TypiQLBroker::publish(#changed_struct {
                                     operation_name: "remove".to_string(),
@@ -2145,7 +2276,7 @@ pub fn typiql_type(attr: TokenStream, item: TokenStream) -> TokenStream {
                         async fn #fn_ident(
                             &self,
                             ctx: &::async_graphql::Context<'_>,
-                            id: ::std::option::Option<::std::string::String>,
+                            id: ::std::option::Option<#key_ty>,
                         ) -> ::async_graphql::Result<impl ::async_graphql::futures_util::Stream<Item = #changed_struct>> {
                             use ::async_graphql::futures_util::StreamExt as _;
                             #roles
@@ -2227,6 +2358,9 @@ pub fn typiql_type(attr: TokenStream, item: TokenStream) -> TokenStream {
                 type Input = #input_name;
                 fn type_name()       -> &'static str { #name_str }
                 fn key_field()       -> &'static str { #key_field_str }
+                #key_json_fns
+                #procedure_fn
+                #aggregate_fn
                 #data_name_fn
                 #joins_fn
                 fn operations() -> &'static [(&'static str, &'static str)] {
@@ -2460,6 +2594,8 @@ pub fn typiql_schema(input: TokenStream) -> TokenStream {
             // duckdb_columns(), before any query can run. A no-op for
             // adapters with no fixed schema (JSON, ...).
             #(
+                // (An aggregate type has no storage of its own to register.)
+                if <#types as ::typiql::TypiQLType>::aggregate().is_none() {
                 adapters.get(<#types as ::typiql::TypiQLType>::adapter_name())
                     .unwrap_or_else(|| panic!(
                         "typiql_schema!: no adapter registered under name {:?} (needed by type {:?})",
@@ -2471,6 +2607,11 @@ pub fn typiql_schema(input: TokenStream) -> TokenStream {
                         <#types as ::typiql::TypiQLType>::key_field(),
                         <#types as ::typiql::TypiQLType>::duckdb_columns(),
                     );
+                }
+                if let ::std::option::Option::Some((procedure, params)) = <#types as ::typiql::TypiQLType>::procedure() {
+                    adapters[<#types as ::typiql::TypiQLType>::adapter_name()]
+                        .register_procedure(<#types as ::typiql::TypiQLType>::collection_name(), procedure, params);
+                }
             )*
 
             #[allow(unused_mut)]

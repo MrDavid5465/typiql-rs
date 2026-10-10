@@ -23,6 +23,9 @@ type FileTables = HashMap<PathBuf, HashMap<String, Vec<Value>>>;
 pub struct JsonAdapter {
     data_dir: PathBuf,
     files: Arc<RwLock<FileTables>>,
+    /// Tables whose key is an integer (from `register_type`): new rows get
+    /// the next number rather than a UUID.
+    integer_keys: Arc<RwLock<std::collections::HashSet<String>>>,
 }
 
 impl JsonAdapter {
@@ -30,6 +33,7 @@ impl JsonAdapter {
         Self {
             data_dir: data_dir.as_ref().to_path_buf(),
             files: Arc::new(RwLock::new(HashMap::new())),
+            integer_keys: Arc::new(RwLock::new(Default::default())),
         }
     }
 
@@ -227,18 +231,18 @@ impl JsonAdapter {
         result
     }
 
-    /// The row's key as a string, if it has one.
-    fn key_of<'a>(row: &'a Value, key_field: &str) -> Option<&'a str> {
-        row.get(key_field).and_then(Value::as_str)
+    /// The row's key as text (a number's digits for an integer key), if it
+    /// has one.
+    fn key_of(row: &Value, key_field: &str) -> Option<String> {
+        match row.get(key_field)? {
+            Value::String(s) => Some(s.clone()),
+            Value::Number(n) => Some(n.to_string()),
+            _ => None,
+        }
     }
 
-    /// Gives `row` a fresh UUID key if it has none (or an empty one).
-    fn assign_key(row: &mut Value, key_field: &str) {
-        if Self::key_of(row, key_field).is_none_or(str::is_empty) {
-            if let Value::Object(map) = row {
-                map.insert(key_field.to_string(), Value::String(Uuid::new_v4().to_string()));
-            }
-        }
+    fn has_key(row: &Value, key_field: &str) -> bool {
+        Self::key_of(row, key_field).is_some_and(|k| !k.is_empty())
     }
 
     fn matches_all(item: &Value, filters: &[FieldFilter]) -> bool {
@@ -250,12 +254,9 @@ impl JsonAdapter {
 impl TypiQLAdapter for JsonAdapter {
     async fn get_one(&self, location: Location, key_field: &str, key_value: &str) -> Option<Value> {
         let (path, table) = self.resolve(&location);
-        self.read_table(&path, &table).into_iter().find(|item| {
-            item.get(key_field)
-                .and_then(Value::as_str)
-                .map(|s| s == key_value)
-                .unwrap_or(false)
-        })
+        self.read_table(&path, &table)
+            .into_iter()
+            .find(|item| Self::key_of(item, key_field).as_deref() == Some(key_value))
     }
 
     async fn get_many(&self, location: Location, filters: Vec<FieldFilter>) -> Vec<Value> {
@@ -305,15 +306,35 @@ impl TypiQLAdapter for JsonAdapter {
         mut values: Vec<Value>,
     ) -> Result<Vec<Value>, String> {
         let (path, table) = self.resolve(&location);
-        for v in &mut values {
-            Self::assign_key(v, key_field);
-        }
+        let integer_key = self.integer_keys.read().contains(&table);
         self.modify_table(&path, &table, |rows| {
-            let mut keys: std::collections::HashSet<&str> =
+            // Missing keys: the next number(s) for an integer key — decided
+            // under the write lock, so concurrent adds never collide — or a
+            // UUID.
+            let mut next = rows
+                .iter()
+                .filter_map(|r| r.get(key_field).and_then(Value::as_i64))
+                .chain(values.iter().filter_map(|r| r.get(key_field).and_then(Value::as_i64)))
+                .max()
+                .unwrap_or(0);
+            for v in &mut values {
+                if !Self::has_key(v, key_field) {
+                    let key = if integer_key {
+                        next += 1;
+                        Value::from(next)
+                    } else {
+                        Value::String(Uuid::new_v4().to_string())
+                    };
+                    if let Value::Object(map) = v {
+                        map.insert(key_field.to_string(), key);
+                    }
+                }
+            }
+            let mut keys: std::collections::HashSet<String> =
                 rows.iter().filter_map(|r| Self::key_of(r, key_field)).collect();
             for v in &values {
                 let key = Self::key_of(v, key_field).unwrap_or_default();
-                if !keys.insert(key) {
+                if !keys.insert(key.clone()) {
                     return (false, Err(format!("Duplicate key `{key}`")));
                 }
             }
@@ -333,7 +354,7 @@ impl TypiQLAdapter for JsonAdapter {
         self.modify_table(&path, &table, |rows| {
             let Some(Value::Object(item)) = rows
                 .iter_mut()
-                .find(|r| Self::key_of(r, key_field) == Some(key_value))
+                .find(|r| Self::key_of(r, key_field).as_deref() == Some(key_value))
             else {
                 return (false, None);
             };
@@ -351,7 +372,7 @@ impl TypiQLAdapter for JsonAdapter {
     async fn remove(&self, location: Location, key_field: &str, key_value: &str) -> Option<Value> {
         let (path, table) = self.resolve(&location);
         self.modify_table(&path, &table, |rows| {
-            match rows.iter().position(|r| Self::key_of(r, key_field) == Some(key_value)) {
+            match rows.iter().position(|r| Self::key_of(r, key_field).as_deref() == Some(key_value)) {
                 Some(i) => (true, Some(rows.remove(i))),
                 None => (false, None),
             }
@@ -366,7 +387,7 @@ impl TypiQLAdapter for JsonAdapter {
         self.modify_table(&path, &table, |rows| {
             let mut updated = Vec::new();
             for row in rows.iter_mut() {
-                if !Self::key_of(row, key_field).is_some_and(|k| keys.contains(k)) {
+                if !Self::key_of(row, key_field).is_some_and(|k| keys.contains(&k)) {
                     continue;
                 }
                 if let (Value::Object(item), Value::Object(patch)) = (&mut *row, &patch) {
@@ -388,10 +409,20 @@ impl TypiQLAdapter for JsonAdapter {
         self.modify_table(&path, &table, |rows| {
             let (removed, kept): (Vec<Value>, Vec<Value>) = std::mem::take(rows)
                 .into_iter()
-                .partition(|row| Self::key_of(row, key_field).is_some_and(|k| keys.contains(k)));
+                .partition(|row| Self::key_of(row, key_field).is_some_and(|k| keys.contains(&k)));
             *rows = kept;
             (!removed.is_empty(), removed)
         })
+    }
+
+    fn register_type(&self, table: &str, key_field: &str, columns: &[(&'static str, &'static str)]) {
+        let integer = columns
+            .iter()
+            .find(|(name, _)| *name == key_field)
+            .is_some_and(|(_, ty)| is_integer_type(ty));
+        if integer {
+            self.integer_keys.write().insert(table.to_string());
+        }
     }
 
     async fn set_table(&self, location: Location, rows: Vec<Value>) {
@@ -401,6 +432,16 @@ impl TypiQLAdapter for JsonAdapter {
             (true, ())
         });
     }
+}
+
+/// Whether a column type marker (see `TypiQLType::duckdb_columns`) is an
+/// integer.
+fn is_integer_type(ty: &str) -> bool {
+    let base = ty.strip_suffix(" NOT NULL").unwrap_or(ty);
+    matches!(
+        base,
+        "TINYINT" | "SMALLINT" | "INTEGER" | "BIGINT" | "HUGEINT" | "UTINYINT" | "USMALLINT" | "UINTEGER" | "UBIGINT" | "UHUGEINT"
+    )
 }
 
 #[cfg(test)]

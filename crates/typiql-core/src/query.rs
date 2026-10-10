@@ -281,6 +281,111 @@ pub fn compare(a: Option<&Value>, b: Option<&Value>) -> Ordering {
     }
 }
 
+// ── aggregate types ───────────────────────────────────────────────────────
+
+/// One aggregated value of an aggregate type's row.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum AggregateFn {
+    /// Rows in the group.
+    Count,
+    /// Rows in the group with a (non-null) value for the field.
+    CountOf,
+    /// Total of the field's numbers; 0 when there are none (Mongo `$sum`).
+    Sum,
+    /// Mean of the field's numbers; null when there are none.
+    Avg,
+    /// Smallest / largest value, in the reference sort order; null when
+    /// there are none.
+    Min,
+    Max,
+}
+
+#[derive(Debug, Clone)]
+pub struct Measure {
+    /// The aggregate row's field (storage name).
+    pub name: String,
+    pub func: AggregateFn,
+    /// The source field (storage name) — none for `Count`.
+    pub field: Option<String>,
+}
+
+/// An aggregate type (`#[typiql_type(aggregate = "Source")]`): its rows are
+/// the source collection's rows grouped by `groups` (aggregate field,
+/// source field — both storage names), each with its `measures`. Like
+/// Mongo's `$group`, an empty source has no groups at all.
+#[derive(Debug, Clone)]
+pub struct AggregateSpec {
+    pub source: String,
+    pub groups: Vec<(String, String)>,
+    pub measures: Vec<Measure>,
+}
+
+impl AggregateSpec {
+    /// Groups and aggregates source rows in memory — the reference for
+    /// adapters that push this into their store.
+    pub fn compute(&self, rows: Vec<Value>) -> Vec<Value> {
+        let mut groups: Vec<(Vec<Value>, Vec<Value>)> = Vec::new();
+        for row in rows {
+            let key: Vec<Value> = self
+                .groups
+                .iter()
+                .map(|(_, source)| row.get(source).cloned().unwrap_or(Value::Null))
+                .collect();
+            match groups.iter_mut().find(|(k, _)| *k == key) {
+                Some((_, members)) => members.push(row),
+                None => groups.push((key, vec![row])),
+            }
+        }
+        groups
+            .into_iter()
+            .map(|(key, members)| {
+                let mut out = serde_json::Map::new();
+                for ((name, _), value) in self.groups.iter().zip(key) {
+                    out.insert(name.clone(), value);
+                }
+                for m in &self.measures {
+                    out.insert(m.name.clone(), m.compute(&members));
+                }
+                Value::Object(out)
+            })
+            .collect()
+    }
+}
+
+impl Measure {
+    fn compute(&self, rows: &[Value]) -> Value {
+        let values: Vec<&Value> = self
+            .field
+            .as_ref()
+            .map(|f| rows.iter().filter_map(|r| r.get(f)).filter(|v| !v.is_null()).collect())
+            .unwrap_or_default();
+        let numbers = || values.iter().filter_map(|v| v.as_f64());
+        match self.func {
+            AggregateFn::Count => Value::from(rows.len() as i64),
+            AggregateFn::CountOf => Value::from(values.len() as i64),
+            // Non-numbers are ignored; all-integer (or no) numbers sum to an
+            // integer.
+            AggregateFn::Sum => {
+                if values.iter().filter(|v| v.is_number()).all(|v| v.is_i64()) {
+                    Value::from(values.iter().filter_map(|v| v.as_i64()).sum::<i64>())
+                } else {
+                    Value::from(numbers().sum::<f64>())
+                }
+            }
+            AggregateFn::Avg => {
+                let n: Vec<f64> = numbers().collect();
+                if n.is_empty() {
+                    Value::Null
+                } else {
+                    Value::from(n.iter().sum::<f64>() / n.len() as f64)
+                }
+            }
+            AggregateFn::Min => values.into_iter().min_by(|a, b| compare(Some(a), Some(b))).cloned().unwrap_or(Value::Null),
+            AggregateFn::Max => values.into_iter().max_by(|a, b| compare(Some(a), Some(b))).cloned().unwrap_or(Value::Null),
+        }
+    }
+}
+
 // ── list element filters ──────────────────────────────────────────────────
 
 /// Which element of a list an element filter looks at.

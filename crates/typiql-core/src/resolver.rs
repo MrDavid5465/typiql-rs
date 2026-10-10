@@ -54,6 +54,14 @@ pub async fn resolve_list<T: TypiQLType>(
 /// to pick up.
 pub async fn resolve_query<T: TypiQLType>(ctx: &Context<'_>, mut query: ListQuery) -> GqlResult<Vec<T>> {
     let adapter = adapter_for::<T>(ctx)?;
+    if let Some(spec) = T::aggregate() {
+        return adapter
+            .aggregate(spec, query)
+            .await
+            .into_iter()
+            .map(|v| serde_json::from_value(v).map_err(|e| async_graphql::Error::new(e.to_string())))
+            .collect();
+    }
     let adapters = ctx.data::<AdapterMap>()?;
     // Only join what this query uses: a selected relation field, or one
     // the sort goes through.
@@ -123,7 +131,10 @@ pub async fn resolve_query<T: TypiQLType>(ctx: &Context<'_>, mut query: ListQuer
 /// `<list>PageInfo` for the same arguments as a list read.
 pub async fn resolve_page_info<T: TypiQLType>(ctx: &Context<'_>, query: ListQuery) -> GqlResult<PageInfo> {
     let adapter = adapter_for::<T>(ctx)?;
-    let total = adapter.count(T::collection_name().into(), query.filters).await;
+    let total = match T::aggregate() {
+        Some(spec) => adapter.aggregate_count(spec, query.filters).await,
+        None => adapter.count(T::collection_name().into(), query.filters).await,
+    };
     Ok(PageInfo::new(total, query.skip, query.limit))
 }
 
@@ -406,7 +417,7 @@ async fn in_scope<T: TypiQLType>(
     scope.push(FieldFilter {
         field: T::key_field().to_string(),
         op: FilterOp::Eq,
-        value: Value::String(key_value.to_string()),
+        value: T::key_json(key_value),
     });
     !adapter
         .get_many(T::collection_name().into(), scope)
@@ -441,7 +452,7 @@ fn complete_row<T: TypiQLType>(row: Value) -> GqlResult<Value> {
     let mut probe = row.clone();
     if let Value::Object(map) = &mut probe {
         if !has_key {
-            map.insert(key.to_string(), Value::String(String::new()));
+            map.insert(key.to_string(), T::key_placeholder());
         }
     }
     let full: T = serde_json::from_value(probe)?;

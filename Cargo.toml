@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/typiql-macros", "crates/typiql-core", "crates/typiql-adapter-json", "crates/typiql-adapter-duckdb", "crates/typiql-conformance"]
+members = ["crates/typiql-macros", "crates/typiql-core", "crates/typiql-adapter-json", "crates/typiql-adapter-duckdb", "crates/typiql-conformance", "crates/typiql-adapter-mssql", "crates/typiql-adapter-mongo", "crates/typiql-adapter-ldap"]
 resolver = "2"
 
 [workspace.package]
