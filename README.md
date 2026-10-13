@@ -89,8 +89,8 @@ The macros expand to `::typiql::…`, `::async_graphql::…`, `::tokio::…`,
 dependencies:
 
 ```toml
-typiql = { package = "typiql-core", git = "https://github.com/MrDavid5465/typiql-rs" }
-typiql-adapter-json = { git = "https://github.com/MrDavid5465/typiql-rs" }
+typiql = { package = "typiql-core", git = "file:///var/mnt/Media/david-source/repos/typiql-standins/typiql-rs" }
+typiql-adapter-json = { git = "file:///var/mnt/Media/david-source/repos/typiql-standins/typiql-rs" }
 async-graphql = "7"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net"] }
 serde = { version = "1", features = ["derive"] }
