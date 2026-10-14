@@ -487,6 +487,11 @@ control of its session; they can set cookies with
 `ctx.append_http_header("set-cookie", ...)`. Custom resolvers read the
 app's user type with `ctx.data::<MyUser>()`.
 
+Your own query, mutation and subscription roots are merged after the
+generated ones, so a hand-written field named like a generated operation
+(`getTasks`, `addTask`, ...) deliberately replaces it. Give a resolver a
+unique name when it should sit alongside the generated ones instead.
+
 Hand-written resolvers are still the right tool for anything that isn't
 CRUD (cross-row invariants, live external-process control, non-JSON file
 parsing) — typiql only generates the CRUD surface. They should still read

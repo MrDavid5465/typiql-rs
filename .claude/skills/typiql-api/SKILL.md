@@ -357,6 +357,16 @@ These are **not** reasons for a custom resolver:
   filter in code.
 - "Child rows with their parent." Use a relation.
 
+### Naming: override or add
+
+`typiql_schema!` merges your own query, mutation and subscription roots
+*after* the generated ones, so **a hand-written field with a generated name
+replaces the generated one**. That is deliberate: overriding a generated
+operation (`getTasks`, `addTask`, `taskChanged`, ...) is often the reason to
+write a custom resolver. If you want an operation *alongside* the generated
+ones, give it a unique name (e.g. `taskSummaries`, not `getTasks`);
+otherwise the generated version silently disappears from the schema.
+
 ### Writing one correctly
 
 Use the typed helpers in `typiql::`. They pick the type's adapter, complete new
