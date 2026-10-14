@@ -89,8 +89,16 @@ impl CurrentUser {
 /// custom resolvers) and as [`CurrentUser`] (for generated code). The router
 /// does this per request; call it directly when executing a schema without
 /// the router (tests, an in-process transport).
-pub fn with_user<U: TypiQLUser>(request: async_graphql::Request, user: U) -> async_graphql::Request {
-    request.data(CurrentUser::new(user.clone())).data(user)
+pub fn with_user<U: TypiQLUser>(mut request: async_graphql::Request, user: U) -> async_graphql::Request {
+    insert_user(&mut request.data, user);
+    request
+}
+
+/// [`with_user`] for a bare [`async_graphql::Data`] — what a WebSocket
+/// connection's session data is built from.
+pub(crate) fn insert_user<U: TypiQLUser>(data: &mut async_graphql::Data, user: U) {
+    data.insert(CurrentUser::new(user.clone()));
+    data.insert(user);
 }
 
 fn current_user<'a>(ctx: &'a Context<'_>) -> GqlResult<&'a CurrentUser> {

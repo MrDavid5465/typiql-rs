@@ -13,7 +13,7 @@ typiql-macros = { path = "../typiql-macros", version = "0.1" }
 
 async-graphql        = { version = "7", features = ["dataloader"] }
 async-graphql-axum   = "7"
-axum                 = "0.8"
+axum                 = { version = "0.8", features = ["ws"] }
 async-trait          = "0.1"
 tokio                = { version = "1", features = ["sync", "rt"] }
 tokio-stream         = { version = "0.1", features = ["sync"] }
@@ -26,5 +26,10 @@ http                 = "1"
 bytes                = "1"
 
 [dev-dependencies]
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "time"] }
 tower = { version = "0.5", features = ["util"] }
+# Transport tests: a real server, a WebSocket client and a raw HTTP/1 client.
+tokio-tungstenite = "0.29"
+hyper = { version = "1", features = ["client", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"

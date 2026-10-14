@@ -105,14 +105,18 @@ async fn main() {
 `build_typiql_schema(adapters)` and `typiql_schema_builder(adapters)`. Use the
 builder when you need to add `.data(...)` or extensions before `.finish()`.
 
-The router serves `POST /graphql` (queries, mutations and subscriptions) and
-`GET /playground` under the prefix you nest it at. The second argument is the
-absolute GraphQL URL the playground calls.
+The router serves, under the prefix you nest it at, `POST /graphql` (queries,
+mutations, multipart subscriptions), `GET /graphql` (a query-string query, or
+a WebSocket upgrade for subscriptions) and `GET /playground`. The second
+argument is the absolute GraphQL URL the playground calls.
 - `typiql::typiql_router(schema, path)` is shorthand for
   `typiql::TypiQLRouter::new(schema, path).build()`.
 - Use `TypiQLRouter` directly only when the app has users:
   `TypiQLRouter::new(schema, path).with_user::<MyUser>().build()`. See the
-  README's "Optional auth".
+  README's "Optional auth". For bearer tokens over WebSockets, add
+  `.with_connection_auth(|params| async move { … })`, which reads the
+  client's `connectionParams`.
+- WebSockets are on by default; `.without_websockets()` leaves multipart only.
 
 ### Adapters
 
@@ -229,17 +233,30 @@ snake_case name):
   - A value sets it.
   - Never write a "patch" resolver. This is already a patch.
 - **Upsert**: `_upsert: true` creates the row if the key doesn't exist.
-- **Subscriptions** are served over HTTP multipart. There's no WebSocket
-  endpoint.
-  - POST the subscription with
+- **Subscriptions** are served two ways, both on the GraphQL path itself
+  (`/typiql/graphql`; there's no separate WebSocket path):
+  - **WebSocket** (use this from frontends): `graphql-transport-ws`, the
+    `graphql-ws` npm package's protocol. The legacy `graphql-ws`
+    (subscriptions-transport-ws) subprotocol works too. With Apollo Client 4:
+    `ApolloLink.split(isSubscription, new GraphQLWsLink(createClient({ url: wsUrl })), new HttpLink({ uri }))`,
+    where `wsUrl` is the HTTP URL with `http` swapped for `ws` (`https` →
+    `wss`). The README has the full snippet. One socket carries all of a
+    client's subscriptions.
+  - **Multipart HTTP** (use where upgrades can't get through, or for `curl -N`):
+    POST the subscription with
     `Accept: multipart/mixed; boundary="graphql"; subscriptionSpec="1.0"`.
-  - Each part is `{"data":{"taskChanged":{…}}}`. A `{}` heartbeat arrives every
-    second.
+    Each part is `{"data":{"taskChanged":{…}}}`, and a `{}` heartbeat arrives
+    every second. Each open subscription holds one browser connection.
+  - Auth is the same on both: the app's middleware runs on the WebSocket
+    upgrade request too, so cookie sessions just work. Browsers can't set
+    headers on a WebSocket, so bearer tokens go in `connectionParams`
+    (e.g. `{ authorization: "Bearer …" }`), checked server-side by
+    `TypiQLRouter::with_connection_auth`. `roles`/`scope` behave identically.
   - `operationName` is `"add"`, `"update"` or `"remove"`. `value` is the full
     row (the removed row, for remove).
   - Pass `id` to watch one record.
-  - Each open subscription holds one browser connection. To listen to many
-    types, put several aliased `xChanged` fields in one operation (see
+  - To listen to many types, put several aliased `xChanged` fields in one
+    operation (see
     [One subscription for every type](#one-subscription-for-every-type-live-updates-hub)).
 - **Batching**: several mutations can go in one request with GraphQL aliases
   (`a: addTask(…) b: addTask(…)`).
@@ -439,8 +456,10 @@ impl AppMutation {
 
 Browsers allow about 6 connections per origin, and each open multipart
 subscription holds one of them. A frontend that opens one `xChanged`
-subscription per mounted screen can run out of connections and silently stall
-other requests.
+subscription per mounted screen over multipart can run out of connections and
+silently stall other requests. Over a WebSocket, every subscription shares one
+socket, so that limit doesn't bite, but merging still sends fewer operations
+and keeps a client portable between the two transports.
 
 **No server code is needed.** A single subscription operation can hold several
 root fields, each under its own alias. async-graphql runs each root field as

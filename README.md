@@ -141,11 +141,10 @@ over GraphQL. In Rust they're snake_case `MaybeUndefined<T>`:
 
 List names come from a simple pluralizer: `Entry` gives `getEntries`, but
 `Recurring` gives `getRecurrings` and `Batch` gives `getBatchs`. Check the
-playground when you're unsure. Subscriptions are served as HTTP multipart
-(`Accept: multipart/mixed; boundary="graphql"; subscriptionSpec="1.0"`).
-There's no WebSocket endpoint.
+playground when you're unsure. Subscriptions are served over WebSockets
+and over multipart HTTP; see [Subscriptions](#subscriptions-websockets-and-multipart-http).
 
-To listen to many types on one connection, you don't need server code. Put
+To listen to many types in one operation, you don't need server code. Put
 several generated `xChanged` fields in one subscription operation, each under
 its own alias:
 
@@ -171,8 +170,75 @@ let app = axum::Router::new()
 `typiql_router(schema, path)` is shorthand for
 `TypiQLRouter::new(schema, path).build()`. Use the builder directly only to
 attach a user type (`.with_user::<MyUser>()`; see [Optional auth](#optional-auth)).
-It serves `POST /graphql` and `GET /playground` under the prefix you nest it at.
+It serves, under the prefix you nest it at:
+
+- `POST /graphql`: queries, mutations, and subscriptions as multipart HTTP.
+- `GET /graphql`: a query in the query string, or, with `Upgrade: websocket`,
+  subscriptions over a WebSocket.
+- `GET /playground`: the GraphQL Playground.
+
 It adds no CORS layer, so add your own if the frontend is on another origin.
+
+### Subscriptions: WebSockets and multipart HTTP
+
+Subscriptions are served two ways, both on the GraphQL path itself (e.g.
+`/typiql/graphql`). There's no separate WebSocket path.
+
+- **WebSockets** (the default for apps): a `GET` with `Upgrade: websocket`
+  on the GraphQL path. Two subprotocols are accepted, chosen by the client's
+  `Sec-WebSocket-Protocol`:
+  - `graphql-transport-ws`: the protocol of the `graphql-ws` npm package
+    (Apollo's `GraphQLWsLink`). Use this one.
+  - `graphql-ws`: the legacy subscriptions-transport-ws protocol (Apollo's old
+    `WebSocketLink`), for old clients.
+
+  One socket carries every subscription the client opens, so many screens
+  listening at once cost one connection.
+- **Multipart HTTP**: `POST` the subscription with
+  `Accept: multipart/mixed; boundary="graphql"; subscriptionSpec="1.0"`.
+  Each open subscription holds one HTTP connection, and browsers allow about
+  6 per origin, so merge a page's subscriptions into one aliased operation
+  (above). Use it where WebSockets can't go (a proxy that drops upgrades) or
+  for a quick `curl -N`.
+
+Both run the same subscription resolvers, as the same user, so `roles` and
+`scope` behave identically. To serve multipart only, call
+`TypiQLRouter::new(schema, path).without_websockets()`.
+
+A proxy in front of the app must pass WebSocket upgrades through on the
+GraphQL path (nginx: `proxy_http_version 1.1` plus the `Upgrade` and
+`Connection` headers).
+
+An Apollo Client 4 setup that sends subscriptions over the WebSocket and
+everything else over HTTP, deriving `ws://`/`wss://` from the HTTP URL:
+
+```ts
+import { ApolloClient, ApolloLink, HttpLink, InMemoryCache } from "@apollo/client";
+import { GraphQLWsLink } from "@apollo/client/link/subscriptions";
+import { getMainDefinition } from "@apollo/client/utilities";
+import { createClient } from "graphql-ws";
+
+const uri = new URL("/typiql/graphql", location.href).href;
+const wsUrl = uri.replace(/^http/, "ws"); // http: -> ws:, https: -> wss:
+
+const client = new ApolloClient({
+  cache: new InMemoryCache(),
+  link: ApolloLink.split(
+    ({ query }) => {
+      const def = getMainDefinition(query);
+      return def.kind === "OperationDefinition" && def.operation === "subscription";
+    },
+    new GraphQLWsLink(createClient({
+      url: wsUrl,
+      // Only for token auth; a cookie session needs nothing here.
+      connectionParams: () => ({ authorization: `Bearer ${getToken()}` }),
+    })),
+    new HttpLink({ uri }),
+  ),
+});
+```
+
+The packages are `@apollo/client` (4.x), `graphql` and `graphql-ws`.
 
 ### Filtering, sorting and paging
 
@@ -452,6 +518,36 @@ impl TypiQLUser for MyUser {
 
 let typiql = TypiQLRouter::new(schema, "/typiql/graphql").with_user::<MyUser>().build();
 ```
+
+The same user reaches subscriptions on either transport. A multipart
+subscription is an ordinary `POST`. A WebSocket's upgrade request also passes
+through your middleware, so a user it finds in a cookie (or in a header, from
+a non-browser client) is attached to every subscription on that socket.
+
+Browsers can't set headers on a WebSocket. For bearer tokens, the client
+sends them in `connectionParams` (the `connection_init` payload), and the app
+checks them with `with_connection_auth`:
+
+```rust
+let typiql = TypiQLRouter::new(schema, "/typiql/graphql")
+    .with_user::<MyUser>()
+    .with_connection_auth(|params: serde_json::Value| async move {
+        match params["authorization"].as_str() {
+            Some(header) => verify_bearer(header).map(Some), // async_graphql::Result<MyUser>
+            None => Ok(None),
+        }
+    })
+    .build();
+```
+
+- `Ok(Some(user))`: every subscription on the socket runs as that user.
+- `Ok(None)`: the upgrade request's user, if any, applies.
+- `Err(_)`: the connection is refused before `connection_ack`.
+
+With cookie sessions, check the `Origin` header of WebSocket upgrades in your
+middleware. Browsers send cookies on cross-site WebSocket handshakes, and CORS
+doesn't apply to them, so another site's page could otherwise subscribe as
+your user. Token auth through `connectionParams` isn't exposed to this.
 
 Operations can then declare:
 
