@@ -40,7 +40,7 @@ workspace/
   per-form/
 ```
 
-For a non-React frontend, the web-component alternatives are [typical-admin-wc](file:///var/mnt/Media/david-source/repos/typiql-standins/typical-admin-wc) (CRUD pattern, forms, data layer) and [denim-wc](file:///var/mnt/Media/david-source/repos/typiql-standins/denim-wc) (app shell), Lit 3 + Web Awesome 3, cloned side by side the same way; their skills are in each repo's `.claude/skills/`.
+For a non-React frontend, the web-component alternatives are [typical-admin-wc](https://github.com/MrDavid5465/typical-admin-wc) (CRUD pattern, forms, data layer) and [denim-wc](https://github.com/MrDavid5465/denim-wc) (app shell), Lit 3 + Web Awesome 3, cloned side by side the same way; their skills are in each repo's `.claude/skills/`.
 
 ## Crates
 
@@ -91,8 +91,8 @@ The macros expand to `::typiql::…`, `::async_graphql::…`, `::tokio::…`,
 dependencies:
 
 ```toml
-typiql = { package = "typiql-core", git = "file:///var/mnt/Media/david-source/repos/typiql-standins/typiql-rs" }
-typiql-adapter-json = { git = "file:///var/mnt/Media/david-source/repos/typiql-standins/typiql-rs" }
+typiql = { package = "typiql-core", git = "https://github.com/MrDavid5465/typiql-rs" }
+typiql-adapter-json = { git = "https://github.com/MrDavid5465/typiql-rs" }
 async-graphql = "7"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net"] }
 serde = { version = "1", features = ["derive"] }

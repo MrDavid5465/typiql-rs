@@ -31,8 +31,8 @@ even then go through typiql's adapter and helpers.
 [dependencies]
 # The crate is published as `typiql-core`, but the macros expand to `::typiql::…`
 # paths. It MUST be renamed to `typiql`.
-typiql = { package = "typiql-core", git = "file:///var/mnt/Media/david-source/repos/typiql-standins/typiql-rs" }
-typiql-adapter-json = { git = "file:///var/mnt/Media/david-source/repos/typiql-standins/typiql-rs" }
+typiql = { package = "typiql-core", git = "https://github.com/MrDavid5465/typiql-rs" }
+typiql-adapter-json = { git = "https://github.com/MrDavid5465/typiql-rs" }
 # Side-by-side clone instead: path = "../typiql-rs/crates/typiql-core" (and …/typiql-adapter-json)
 
 # All four are required. The macro output names ::async_graphql, ::tokio,
