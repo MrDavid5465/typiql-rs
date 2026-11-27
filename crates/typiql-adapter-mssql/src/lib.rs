@@ -27,8 +27,8 @@ use tokio::net::TcpStream;
 use tokio_util::compat::{Compat, TokioAsyncWriteCompatExt};
 use typiql_core::query::matches_all;
 use typiql_core::{
-    is_element_filter, AggregateFn, AggregateSpec, FieldFilter, FilterOp, Join, JoinValue, ListQuery, Location,
-    SortKey, TypiQLAdapter,
+    is_element_filter, AggregateFn, AggregateSpec, FieldFilter, FilterOp, Join, JoinValue,
+    ListQuery, Location, SortKey, TypiQLAdapter,
 };
 
 type Conn = Client<Compat<TcpStream>>;
@@ -86,7 +86,14 @@ impl Col {
     fn is_integer(&self) -> bool {
         matches!(
             self.base(),
-            "TINYINT" | "SMALLINT" | "INTEGER" | "BIGINT" | "UTINYINT" | "USMALLINT" | "UINTEGER" | "UBIGINT"
+            "TINYINT"
+                | "SMALLINT"
+                | "INTEGER"
+                | "BIGINT"
+                | "UTINYINT"
+                | "USMALLINT"
+                | "UINTEGER"
+                | "UBIGINT"
         )
     }
 }
@@ -117,10 +124,18 @@ impl MssqlAdapter {
     /// Like [`MssqlAdapter::new`], connecting to `database`, which is created
     /// (from the server's `master`) if it doesn't exist — for tests and new
     /// deployments.
-    pub fn with_database(connection_string: &str, database: &str, create_if_missing: bool) -> Result<Self, String> {
+    pub fn with_database(
+        connection_string: &str,
+        database: &str,
+        create_if_missing: bool,
+    ) -> Result<Self, String> {
         let mut config = Config::from_ado_string(connection_string).map_err(|e| e.to_string())?;
         config.database(database);
-        Ok(Self::from_config(config, Some(database.to_string()), create_if_missing))
+        Ok(Self::from_config(
+            config,
+            Some(database.to_string()),
+            create_if_missing,
+        ))
     }
 
     /// Drops `database` (closing any open connections to it) — for removing
@@ -154,9 +169,13 @@ impl MssqlAdapter {
     // ── connections ────────────────────────────────────────────────────────
 
     async fn open(config: Config) -> Result<Conn, String> {
-        let tcp = TcpStream::connect(config.get_addr()).await.map_err(|e| e.to_string())?;
+        let tcp = TcpStream::connect(config.get_addr())
+            .await
+            .map_err(|e| e.to_string())?;
         tcp.set_nodelay(true).ok();
-        Client::connect(config, tcp.compat_write()).await.map_err(|e| e.to_string())
+        Client::connect(config, tcp.compat_write())
+            .await
+            .map_err(|e| e.to_string())
     }
 
     async fn conn(&self) -> Result<Pooled, String> {
@@ -169,8 +188,17 @@ impl MssqlAdapter {
                     let mut master = inner.config.clone();
                     master.database("master");
                     let mut c = Self::open(master).await?;
-                    let sql = format!("IF DB_ID(N'{0}') IS NULL CREATE DATABASE {1}", db.replace('\'', "''"), bracket(&db));
-                    c.simple_query(sql).await.map_err(|e| e.to_string())?.into_results().await.map_err(|e| e.to_string())?;
+                    let sql = format!(
+                        "IF DB_ID(N'{0}') IS NULL CREATE DATABASE {1}",
+                        db.replace('\'', "''"),
+                        bracket(&db)
+                    );
+                    c.simple_query(sql)
+                        .await
+                        .map_err(|e| e.to_string())?
+                        .into_results()
+                        .await
+                        .map_err(|e| e.to_string())?;
                     Ok::<(), String>(())
                 })
                 .await?;
@@ -180,7 +208,11 @@ impl MssqlAdapter {
             Some(c) => c,
             None => Self::open(inner.config.clone()).await?,
         };
-        Ok(Pooled { conn: Some(conn), adapter: self.clone(), healthy: true })
+        Ok(Pooled {
+            conn: Some(conn),
+            adapter: self.clone(),
+            healthy: true,
+        })
     }
 
     fn table(&self, location: &Location) -> Option<(String, Table)> {
@@ -230,8 +262,16 @@ impl MssqlAdapter {
     }
 
     /// Rows matching `filters`, with `tail` (`ORDER BY` / `OFFSET`) after.
-    async fn select(&self, location: &Location, filters: Vec<FieldFilter>, tail: &str) -> Result<Vec<Value>, String> {
-        let q = ListQuery { filters, ..Default::default() };
+    async fn select(
+        &self,
+        location: &Location,
+        filters: Vec<FieldFilter>,
+        tail: &str,
+    ) -> Result<Vec<Value>, String> {
+        let q = ListQuery {
+            filters,
+            ..Default::default()
+        };
         self.select_with_tail(location, &q, tail, Vec::new()).await
     }
 
@@ -245,7 +285,13 @@ impl MssqlAdapter {
     /// C#'s stored-procedure model: `EXEC proc @P1, ...`, each parameter the
     /// value of an equality filter on that key field (NULL if there's none).
     /// Other filters, sorting and paging don't apply, as in C#.
-    async fn exec_procedure(&self, table: &Table, procedure: &str, proc_params: &[String], filters: &[FieldFilter]) -> Result<Vec<Value>, String> {
+    async fn exec_procedure(
+        &self,
+        table: &Table,
+        procedure: &str,
+        proc_params: &[String],
+        filters: &[FieldFilter],
+    ) -> Result<Vec<Value>, String> {
         let mut params = Vec::new();
         let args: Vec<String> = proc_params
             .iter()
@@ -255,14 +301,19 @@ impl MssqlAdapter {
                     .find(|f| &f.field == p && f.op == FilterOp::Eq)
                     .map(|f| &f.value)
                     .unwrap_or(&Value::Null);
-                let col = table.col(p).cloned().unwrap_or(Col { name: p.clone(), ty: "VARCHAR".into() });
+                let col = table.col(p).cloned().unwrap_or(Col {
+                    name: p.clone(),
+                    ty: "VARCHAR".into(),
+                });
                 param(&mut params, to_param(value, &col))
             })
             .collect();
         let name: Vec<String> = procedure.split('.').map(bracket).collect();
         let sql = format!("EXEC {} {}", name.join("."), args.join(", "));
         let mut c = self.conn().await?;
-        let rows = query(&mut c, &sql, params).await.inspect_err(|_| c.healthy = false)?;
+        let rows = query(&mut c, &sql, params)
+            .await
+            .inspect_err(|_| c.healthy = false)?;
         Ok(rows.iter().map(|r| row_json(r, table)).collect())
     }
 
@@ -273,9 +324,23 @@ impl MssqlAdapter {
     /// 0, AVG is over floats (T-SQL's AVG of integers truncates), and an
     /// empty source has no rows even ungrouped.
     fn aggregate_sql(&self, spec: &AggregateSpec) -> Option<(String, Table)> {
-        let source = self.inner.tables.read().unwrap().get(&spec.source).cloned()?;
-        let fallback = Col { name: String::new(), ty: "VARCHAR".into() };
-        let src = |f: &str| source.col(f).cloned().unwrap_or_else(|| Col { name: f.to_string(), ..fallback.clone() });
+        let source = self
+            .inner
+            .tables
+            .read()
+            .unwrap()
+            .get(&spec.source)
+            .cloned()?;
+        let fallback = Col {
+            name: String::new(),
+            ty: "VARCHAR".into(),
+        };
+        let src = |f: &str| {
+            source.col(f).cloned().unwrap_or_else(|| Col {
+                name: f.to_string(),
+                ..fallback.clone()
+            })
+        };
         let numeric = |c: &Col| c.is_integer() || c.base() == "DOUBLE";
         let mut select = Vec::new();
         let mut group_by = Vec::new();
@@ -285,7 +350,10 @@ impl MssqlAdapter {
             let expr = sortable(&col_sql(&col.name, "p"), &col);
             select.push(format!("{expr} AS {}", bracket(out)));
             group_by.push(expr);
-            columns.push(Col { name: out.clone(), ty: col.base().to_string() });
+            columns.push(Col {
+                name: out.clone(),
+                ty: col.base().to_string(),
+            });
         }
         for m in &spec.measures {
             let col = src(m.field.as_deref().unwrap_or_default());
@@ -294,7 +362,10 @@ impl MssqlAdapter {
                 AggregateFn::Count => ("COUNT_BIG(*)".to_string(), "BIGINT"),
                 AggregateFn::CountOf => (format!("COUNT_BIG({c})"), "BIGINT"),
                 AggregateFn::Sum if !numeric(&col) => ("CAST(0 AS BIGINT)".to_string(), "BIGINT"),
-                AggregateFn::Sum if col.is_integer() => (format!("CAST(COALESCE(SUM(CAST({c} AS BIGINT)), 0) AS BIGINT)"), "BIGINT"),
+                AggregateFn::Sum if col.is_integer() => (
+                    format!("CAST(COALESCE(SUM(CAST({c} AS BIGINT)), 0) AS BIGINT)"),
+                    "BIGINT",
+                ),
                 AggregateFn::Sum => (format!("COALESCE(SUM({c}), 0)"), "DOUBLE"),
                 AggregateFn::Avg if !numeric(&col) => ("CAST(NULL AS FLOAT)".to_string(), "DOUBLE"),
                 AggregateFn::Avg => (format!("AVG(CAST({c} AS FLOAT))"), "DOUBLE"),
@@ -302,19 +373,43 @@ impl MssqlAdapter {
                 AggregateFn::Max => (format!("MAX({})", sortable(&c, &col)), col.base()),
             };
             select.push(format!("{expr} AS {}", bracket(&m.name)));
-            columns.push(Col { name: m.name.clone(), ty: ty.to_string() });
+            columns.push(Col {
+                name: m.name.clone(),
+                ty: ty.to_string(),
+            });
         }
         let tail = if group_by.is_empty() {
             " HAVING COUNT_BIG(*) > 0".to_string()
         } else {
             format!(" GROUP BY {}", group_by.join(", "))
         };
-        let key = spec.groups.first().map(|(o, _)| o.clone()).or_else(|| spec.measures.first().map(|m| m.name.clone())).unwrap_or_default();
-        let sql = format!("SELECT {} FROM [dbo].{} AS p{tail}", select.join(", "), bracket(&spec.source));
-        Some((sql, Table { key, columns, procedure: None }))
+        let key = spec
+            .groups
+            .first()
+            .map(|(o, _)| o.clone())
+            .or_else(|| spec.measures.first().map(|m| m.name.clone()))
+            .unwrap_or_default();
+        let sql = format!(
+            "SELECT {} FROM [dbo].{} AS p{tail}",
+            select.join(", "),
+            bracket(&spec.source)
+        );
+        Some((
+            sql,
+            Table {
+                key,
+                columns,
+                procedure: None,
+            },
+        ))
     }
 
-    async fn run_aggregate(&self, spec: &AggregateSpec, q: &ListQuery, count_only: bool) -> Result<(Vec<Value>, usize), String> {
+    async fn run_aggregate(
+        &self,
+        spec: &AggregateSpec,
+        q: &ListQuery,
+        count_only: bool,
+    ) -> Result<(Vec<Value>, usize), String> {
         let Some((_, source)) = self.table(&spec.source.as_str().into()) else {
             return Ok((Vec::new(), 0));
         };
@@ -328,7 +423,10 @@ impl MssqlAdapter {
         if count_only {
             let sql = format!("SELECT COUNT_BIG(*) FROM ({inner}) AS q WHERE {where_sql}");
             let rows = query(&mut c, &sql, params).await?;
-            return Ok((Vec::new(), rows.first().and_then(|r| r.get::<i64, _>(0)).unwrap_or(0) as usize));
+            return Ok((
+                Vec::new(),
+                rows.first().and_then(|r| r.get::<i64, _>(0)).unwrap_or(0) as usize,
+            ));
         }
         let mut sort_params = Vec::new();
         let tail = self.order_sql(q, &table, &[], &mut sort_params);
@@ -336,14 +434,18 @@ impl MssqlAdapter {
         let tail = renumber(&tail, sort_params.len(), offset);
         params.extend(sort_params);
         let sql = format!("SELECT * FROM ({inner}) AS q WHERE {where_sql}{tail}");
-        let rows = query(&mut c, &sql, params).await.inspect_err(|_| c.healthy = false)?;
+        let rows = query(&mut c, &sql, params)
+            .await
+            .inspect_err(|_| c.healthy = false)?;
         Ok((rows.iter().map(|r| row_json(r, &table)).collect(), 0))
     }
 
     /// Writes to a procedure-served type are refused: it's read-only.
     fn writable(table: &Table, name: &str) -> Result<(), String> {
         match &table.procedure {
-            Some((procedure, _)) => Err(format!("`{name}` is read-only: its rows come from stored procedure {procedure}")),
+            Some((procedure, _)) => Err(format!(
+                "`{name}` is read-only: its rows come from stored procedure {procedure}"
+            )),
             None => Ok(()),
         }
     }
@@ -355,23 +457,40 @@ impl MssqlAdapter {
                 self.inner.tables.read().unwrap().contains_key(&j.target)
                     && j.conditions.iter().all(|c| {
                         !is_element_op(c.op)
-                            && !(matches!(c.value, JoinValue::Parent(_)) && matches!(c.op, FilterOp::In | FilterOp::NotIn))
+                            && !(matches!(c.value, JoinValue::Parent(_))
+                                && matches!(c.op, FilterOp::In | FilterOp::NotIn))
                     })
             })
     }
 
-    fn order_sql(&self, q: &ListQuery, table: &Table, joins: &[Join], params: &mut Vec<Param>) -> String {
+    fn order_sql(
+        &self,
+        q: &ListQuery,
+        table: &Table,
+        joins: &[Join],
+        params: &mut Vec<Param>,
+    ) -> String {
         let mut order: Vec<String> = Vec::new();
         for key in &q.sort {
             let dir = if key.desc { "DESC" } else { "ASC" };
             match key.field.split_once('.') {
                 None => {
-                    let Some(col) = table.col(&key.field) else { continue };
-                    order.push(format!("{} {dir}", sortable(&format!("q.{}", bracket(&col.name)), col)));
+                    let Some(col) = table.col(&key.field) else {
+                        continue;
+                    };
+                    order.push(format!(
+                        "{} {dir}",
+                        sortable(&format!("q.{}", bracket(&col.name)), col)
+                    ));
                 }
                 Some((join_name, sub)) => {
-                    let Some(join) = joins.iter().find(|j| j.name == join_name) else { continue };
-                    let Some(target) = self.inner.tables.read().unwrap().get(&join.target).cloned() else { continue };
+                    let Some(join) = joins.iter().find(|j| j.name == join_name) else {
+                        continue;
+                    };
+                    let Some(target) = self.inner.tables.read().unwrap().get(&join.target).cloned()
+                    else {
+                        continue;
+                    };
                     let Some(col) = target.col(sub) else { continue };
                     let expr = join_sort_sql(join, &target, col, key.desc, "q", params);
                     order.push(format!("{expr} {dir}"));
@@ -394,9 +513,15 @@ impl MssqlAdapter {
         tail
     }
 
-    async fn write(&self, location: &Location, build: impl FnOnce(&str, &Table, &mut Vec<Param>) -> Option<String>) -> Result<Vec<Value>, String> {
+    async fn write(
+        &self,
+        location: &Location,
+        build: impl FnOnce(&str, &Table, &mut Vec<Param>) -> Option<String>,
+    ) -> Result<Vec<Value>, String> {
         let Some((name, table)) = self.table(location) else {
-            return Err(format!("mssql adapter: no registered type for table {location:?}"));
+            return Err(format!(
+                "mssql adapter: no registered type for table {location:?}"
+            ));
         };
         Self::writable(&table, &name)?;
         let mut c = self.conn().await?;
@@ -405,13 +530,22 @@ impl MssqlAdapter {
         let Some(sql) = build(&name, &table, &mut params) else {
             return Ok(Vec::new());
         };
-        let rows = query(&mut c, &sql, params).await.inspect_err(|_| c.healthy = false)?;
+        let rows = query(&mut c, &sql, params)
+            .await
+            .inspect_err(|_| c.healthy = false)?;
         Ok(rows.iter().map(|r| row_json(r, &table)).collect())
     }
 
-    async fn insert_many(&self, location: &Location, key_field: &str, mut values: Vec<Value>) -> Result<Vec<Value>, String> {
+    async fn insert_many(
+        &self,
+        location: &Location,
+        key_field: &str,
+        mut values: Vec<Value>,
+    ) -> Result<Vec<Value>, String> {
         let Some((name, table)) = self.table(location) else {
-            return Err(format!("mssql adapter: no registered type for table {location:?}"));
+            return Err(format!(
+                "mssql adapter: no registered type for table {location:?}"
+            ));
         };
         Self::writable(&table, &name)?;
         let identity = table.integer_key();
@@ -432,13 +566,23 @@ impl MssqlAdapter {
         let mut start = 0;
         while start < values.len() {
             let explicit = !identity || has_key(&values[start]);
-            let end = (start..values.len()).find(|&i| (!identity || has_key(&values[i])) != explicit).unwrap_or(values.len());
+            let end = (start..values.len())
+                .find(|&i| (!identity || has_key(&values[i])) != explicit)
+                .unwrap_or(values.len());
             let group = &values[start..end];
             start = end;
-            let columns: Vec<&Col> = table.stored().filter(|c| explicit || c.name != table.key).collect();
+            let columns: Vec<&Col> = table
+                .stored()
+                .filter(|c| explicit || c.name != table.key)
+                .collect();
             let identity_insert = identity && explicit;
             if identity_insert {
-                run(&mut c, &format!("SET IDENTITY_INSERT [dbo].{} ON", bracket(&name)), vec![]).await?;
+                run(
+                    &mut c,
+                    &format!("SET IDENTITY_INSERT [dbo].{} ON", bracket(&name)),
+                    vec![],
+                )
+                .await?;
             }
             let per_chunk = (MAX_PARAMS / columns.len().max(1)).clamp(1, 1000);
             for chunk in group.chunks(per_chunk) {
@@ -448,7 +592,12 @@ impl MssqlAdapter {
                     .map(|v| {
                         let cells: Vec<String> = columns
                             .iter()
-                            .map(|col| param(&mut params, to_param(v.get(&col.name).unwrap_or(&Value::Null), col)))
+                            .map(|col| {
+                                param(
+                                    &mut params,
+                                    to_param(v.get(&col.name).unwrap_or(&Value::Null), col),
+                                )
+                            })
                             .collect();
                         format!("({})", cells.join(", "))
                     })
@@ -456,7 +605,11 @@ impl MssqlAdapter {
                 let sql = format!(
                     "INSERT INTO [dbo].{} ({}) OUTPUT {} VALUES {}",
                     bracket(&name),
-                    columns.iter().map(|c| bracket(&c.name)).collect::<Vec<_>>().join(", "),
+                    columns
+                        .iter()
+                        .map(|c| bracket(&c.name))
+                        .collect::<Vec<_>>()
+                        .join(", "),
                     output_columns(&table, "INSERTED"),
                     rows.join(", ")
                 );
@@ -465,14 +618,24 @@ impl MssqlAdapter {
                     Err(e) => {
                         let _ = run(&mut c, "IF @@TRANCOUNT > 0 ROLLBACK", vec![]).await;
                         if identity_insert {
-                            let _ = run(&mut c, &format!("SET IDENTITY_INSERT [dbo].{} OFF", bracket(&name)), vec![]).await;
+                            let _ = run(
+                                &mut c,
+                                &format!("SET IDENTITY_INSERT [dbo].{} OFF", bracket(&name)),
+                                vec![],
+                            )
+                            .await;
                         }
                         return Err(key_error(&e));
                     }
                 }
             }
             if identity_insert {
-                run(&mut c, &format!("SET IDENTITY_INSERT [dbo].{} OFF", bracket(&name)), vec![]).await?;
+                run(
+                    &mut c,
+                    &format!("SET IDENTITY_INSERT [dbo].{} OFF", bracket(&name)),
+                    vec![],
+                )
+                .await?;
             }
         }
         run(&mut c, "COMMIT", vec![]).await?;
@@ -512,29 +675,47 @@ impl Drop for Pooled {
 #[async_trait]
 impl TypiQLAdapter for MssqlAdapter {
     async fn get_one(&self, location: Location, key_field: &str, key_value: &str) -> Option<Value> {
-        let f = FieldFilter { field: key_field.to_string(), op: FilterOp::Eq, value: Value::String(key_value.to_string()) };
-        self.select(&location, vec![f], " ORDER BY (SELECT NULL) OFFSET 0 ROWS FETCH NEXT 1 ROWS ONLY")
-            .await
-            .ok()
-            .and_then(|rows| rows.into_iter().next())
+        let f = FieldFilter {
+            field: key_field.to_string(),
+            op: FilterOp::Eq,
+            value: Value::String(key_value.to_string()),
+        };
+        self.select(
+            &location,
+            vec![f],
+            " ORDER BY (SELECT NULL) OFFSET 0 ROWS FETCH NEXT 1 ROWS ONLY",
+        )
+        .await
+        .ok()
+        .and_then(|rows| rows.into_iter().next())
     }
 
     async fn get_many(&self, location: Location, filters: Vec<FieldFilter>) -> Vec<Value> {
-        let (in_memory, sql): (Vec<FieldFilter>, Vec<FieldFilter>) = filters.into_iter().partition(is_element_filter);
+        let (in_memory, sql): (Vec<FieldFilter>, Vec<FieldFilter>) =
+            filters.into_iter().partition(is_element_filter);
         let rows = self.select(&location, sql, "").await.unwrap_or_else(|e| {
             eprintln!("typiql-adapter-mssql: {e}");
             Vec::new()
         });
-        rows.into_iter().filter(|r| matches_all(r, &in_memory)).collect()
+        rows.into_iter()
+            .filter(|r| matches_all(r, &in_memory))
+            .collect()
     }
 
-    async fn get_many_matching_any(&self, location: Location, or_groups: Vec<Vec<FieldFilter>>) -> Vec<Value> {
+    async fn get_many_matching_any(
+        &self,
+        location: Location,
+        or_groups: Vec<Vec<FieldFilter>>,
+    ) -> Vec<Value> {
         if or_groups.is_empty() {
             return Vec::new();
         }
         if or_groups.iter().flatten().any(is_element_filter) {
             let all = self.get_many(location, Vec::new()).await;
-            return all.into_iter().filter(|r| or_groups.iter().any(|g| matches_all(r, g))).collect();
+            return all
+                .into_iter()
+                .filter(|r| or_groups.iter().any(|g| matches_all(r, g)))
+                .collect();
         }
         let Some((name, table)) = self.table(&location) else {
             return Vec::new();
@@ -542,7 +723,10 @@ impl TypiQLAdapter for MssqlAdapter {
         if let Some((procedure, proc_params)) = &table.procedure {
             let mut out = Vec::new();
             for group in &or_groups {
-                match self.exec_procedure(&table, procedure, proc_params, group).await {
+                match self
+                    .exec_procedure(&table, procedure, proc_params, group)
+                    .await
+                {
                     Ok(rows) => out.extend(rows),
                     Err(e) => eprintln!("typiql-adapter-mssql: {e}"),
                 }
@@ -553,7 +737,10 @@ impl TypiQLAdapter for MssqlAdapter {
             let mut c = self.conn().await?;
             self.ensure(&mut c, &name, &table).await?;
             let mut params = Vec::new();
-            let groups: Vec<String> = or_groups.iter().map(|g| format!("({})", where_and(g, &table, "p", &mut params))).collect();
+            let groups: Vec<String> = or_groups
+                .iter()
+                .map(|g| format!("({})", where_and(g, &table, "p", &mut params)))
+                .collect();
             let sql = format!(
                 "SELECT {} FROM [dbo].{} AS p WHERE {}",
                 select_columns(&table, "p"),
@@ -571,7 +758,10 @@ impl TypiQLAdapter for MssqlAdapter {
     }
 
     async fn query(&self, location: Location, query: ListQuery) -> Vec<Value> {
-        if self.table(&location).is_some_and(|(_, t)| t.procedure.is_some()) {
+        if self
+            .table(&location)
+            .is_some_and(|(_, t)| t.procedure.is_some())
+        {
             // As in C#: the procedure's rows, as it returns them.
             return self.get_many(location, query.filters).await;
         }
@@ -583,7 +773,9 @@ impl TypiQLAdapter for MssqlAdapter {
         };
         let mut sort_params = Vec::new();
         let tail = self.order_sql(&query, &table, &query.joins, &mut sort_params);
-        let result = self.select_with_tail(&location, &query, &tail, sort_params).await;
+        let result = self
+            .select_with_tail(&location, &query, &tail, sort_params)
+            .await;
         result.unwrap_or_else(|e| {
             eprintln!("typiql-adapter-mssql: {e}");
             Vec::new()
@@ -593,7 +785,11 @@ impl TypiQLAdapter for MssqlAdapter {
     async fn aggregate(&self, spec: AggregateSpec, query: ListQuery) -> Vec<Value> {
         if query.filters.iter().any(is_element_filter) {
             let rows = self.get_many(spec.source.as_str().into(), Vec::new()).await;
-            let rows = spec.compute(rows).into_iter().filter(|r| matches_all(r, &query.filters)).collect();
+            let rows = spec
+                .compute(rows)
+                .into_iter()
+                .filter(|r| matches_all(r, &query.filters))
+                .collect();
             return typiql_core::query::sort_and_page(rows, &query);
         }
         match self.run_aggregate(&spec, &query, false).await {
@@ -606,8 +802,14 @@ impl TypiQLAdapter for MssqlAdapter {
     }
 
     async fn aggregate_count(&self, spec: AggregateSpec, filters: Vec<FieldFilter>) -> usize {
-        let query = ListQuery { filters, ..Default::default() };
-        self.run_aggregate(&spec, &query, true).await.map(|(_, n)| n).unwrap_or(0)
+        let query = ListQuery {
+            filters,
+            ..Default::default()
+        };
+        self.run_aggregate(&spec, &query, true)
+            .await
+            .map(|(_, n)| n)
+            .unwrap_or(0)
     }
 
     async fn count(&self, location: Location, filters: Vec<FieldFilter>) -> usize {
@@ -625,7 +827,10 @@ impl TypiQLAdapter for MssqlAdapter {
             self.ensure(&mut c, &name, &table).await?;
             let mut params = Vec::new();
             let where_sql = where_and(&filters, &table, "p", &mut params);
-            let sql = format!("SELECT COUNT_BIG(*) FROM [dbo].{} AS p WHERE {where_sql}", bracket(&name));
+            let sql = format!(
+                "SELECT COUNT_BIG(*) FROM [dbo].{} AS p WHERE {where_sql}",
+                bracket(&name)
+            );
             let rows = query(&mut c, &sql, params).await?;
             Ok::<_, String>(rows.first().and_then(|r| r.get::<i64, _>(0)).unwrap_or(0) as usize)
         }
@@ -633,11 +838,23 @@ impl TypiQLAdapter for MssqlAdapter {
         result.unwrap_or(0)
     }
 
-    async fn add(&self, location: Location, key_field: &str, values: Value) -> Result<Value, String> {
-        self.insert_many(&location, key_field, vec![values]).await.map(|mut v| v.remove(0))
+    async fn add(
+        &self,
+        location: Location,
+        key_field: &str,
+        values: Value,
+    ) -> Result<Value, String> {
+        self.insert_many(&location, key_field, vec![values])
+            .await
+            .map(|mut v| v.remove(0))
     }
 
-    async fn add_many(&self, location: Location, key_field: &str, values: Vec<Value>) -> Result<Vec<Value>, String> {
+    async fn add_many(
+        &self,
+        location: Location,
+        key_field: &str,
+        values: Vec<Value>,
+    ) -> Result<Vec<Value>, String> {
         let mut seen = HashSet::new();
         for v in &values {
             let key = match v.get(key_field) {
@@ -654,11 +871,26 @@ impl TypiQLAdapter for MssqlAdapter {
         self.insert_many(&location, key_field, values).await
     }
 
-    async fn update(&self, location: Location, key_field: &str, key_value: &str, patch: Value) -> Option<Value> {
-        self.update_many(location, key_field, vec![key_value.to_string()], patch).await.into_iter().next()
+    async fn update(
+        &self,
+        location: Location,
+        key_field: &str,
+        key_value: &str,
+        patch: Value,
+    ) -> Option<Value> {
+        self.update_many(location, key_field, vec![key_value.to_string()], patch)
+            .await
+            .into_iter()
+            .next()
     }
 
-    async fn update_many(&self, location: Location, key_field: &str, keys: Vec<String>, patch: Value) -> Vec<Value> {
+    async fn update_many(
+        &self,
+        location: Location,
+        key_field: &str,
+        keys: Vec<String>,
+        patch: Value,
+    ) -> Vec<Value> {
         let mut out = Vec::new();
         for chunk in keys.chunks(MAX_PARAMS / 2) {
             let rows = self
@@ -669,8 +901,9 @@ impl TypiQLAdapter for MssqlAdapter {
                         .flatten()
                         .filter_map(|(k, v)| {
                             let col = table.col(k)?;
-                            (k != key_field && !col.is_expression())
-                                .then(|| format!("{} = {}", bracket(k), param(params, to_param(v, col))))
+                            (k != key_field && !col.is_expression()).then(|| {
+                                format!("{} = {}", bracket(k), param(params, to_param(v, col)))
+                            })
                         })
                         .collect();
                     let keys_sql = key_list(chunk, params);
@@ -697,10 +930,18 @@ impl TypiQLAdapter for MssqlAdapter {
     }
 
     async fn remove(&self, location: Location, key_field: &str, key_value: &str) -> Option<Value> {
-        self.remove_many(location, key_field, vec![key_value.to_string()]).await.into_iter().next()
+        self.remove_many(location, key_field, vec![key_value.to_string()])
+            .await
+            .into_iter()
+            .next()
     }
 
-    async fn remove_many(&self, location: Location, key_field: &str, keys: Vec<String>) -> Vec<Value> {
+    async fn remove_many(
+        &self,
+        location: Location,
+        key_field: &str,
+        keys: Vec<String>,
+    ) -> Vec<Value> {
         let mut out = Vec::new();
         for chunk in keys.chunks(MAX_PARAMS) {
             let rows = self
@@ -723,8 +964,14 @@ impl TypiQLAdapter for MssqlAdapter {
     }
 
     async fn set_table(&self, location: Location, rows: Vec<Value>) {
-        let Some((name, table)) = self.table(&location) else { return };
-        let _ = self.write(&location, |name, _, _| Some(format!("DELETE FROM [dbo].{}", bracket(name)))).await;
+        let Some((name, table)) = self.table(&location) else {
+            return;
+        };
+        let _ = self
+            .write(&location, |name, _, _| {
+                Some(format!("DELETE FROM [dbo].{}", bracket(name)))
+            })
+            .await;
         if !rows.is_empty() {
             if let Err(e) = self.insert_many(&location, &table.key, rows).await {
                 eprintln!("typiql-adapter-mssql: set_table {name}: {e}");
@@ -734,17 +981,34 @@ impl TypiQLAdapter for MssqlAdapter {
 
     fn register_procedure(&self, table: &str, procedure: &str, params: &[&'static str]) {
         if let Some(t) = self.inner.tables.write().unwrap().get_mut(table) {
-            t.procedure = Some((procedure.to_string(), params.iter().map(|p| p.to_string()).collect()));
+            t.procedure = Some((
+                procedure.to_string(),
+                params.iter().map(|p| p.to_string()).collect(),
+            ));
         }
     }
 
-    fn register_type(&self, table: &str, key_field: &str, columns: &[(&'static str, &'static str)]) {
-        let columns = columns.iter().map(|(n, t)| Col { name: n.to_string(), ty: t.to_string() }).collect();
-        self.inner
-            .tables
-            .write()
-            .unwrap()
-            .insert(table.to_string(), Table { key: key_field.to_string(), columns, procedure: None });
+    fn register_type(
+        &self,
+        table: &str,
+        key_field: &str,
+        columns: &[(&'static str, &'static str)],
+    ) {
+        let columns = columns
+            .iter()
+            .map(|(n, t)| Col {
+                name: n.to_string(),
+                ty: t.to_string(),
+            })
+            .collect();
+        self.inner.tables.write().unwrap().insert(
+            table.to_string(),
+            Table {
+                key: key_field.to_string(),
+                columns,
+                procedure: None,
+            },
+        );
     }
 }
 
@@ -753,12 +1017,20 @@ impl MssqlAdapter {
     /// subquery, the filters, then `tail`. The sort in `tail` numbered its
     /// own parameters from @P1 (`sort_params`); they're renumbered to follow
     /// the select's.
-    async fn select_with_tail(&self, location: &Location, q: &ListQuery, tail: &str, sort_params: Vec<Param>) -> Result<Vec<Value>, String> {
+    async fn select_with_tail(
+        &self,
+        location: &Location,
+        q: &ListQuery,
+        tail: &str,
+        sort_params: Vec<Param>,
+    ) -> Result<Vec<Value>, String> {
         let Some((name, table)) = self.table(location) else {
             return Ok(Vec::new());
         };
         if let Some((procedure, proc_params)) = &table.procedure {
-            return self.exec_procedure(&table, procedure, proc_params, &q.filters).await;
+            return self
+                .exec_procedure(&table, procedure, proc_params, &q.filters)
+                .await;
         }
         let mut c = self.conn().await?;
         self.ensure(&mut c, &name, &table).await?;
@@ -770,7 +1042,9 @@ impl MssqlAdapter {
             .collect();
         let mut joined = Vec::new();
         for join in &q.joins {
-            let Some(target) = self.inner.tables.read().unwrap().get(&join.target).cloned() else { continue };
+            let Some(target) = self.inner.tables.read().unwrap().get(&join.target).cloned() else {
+                continue;
+            };
             self.ensure(&mut c, &join.target, &target).await?;
             let sql = join_json_sql(join, &target, "p", &mut params);
             select.push(format!("({sql}) AS {}", bracket(&join.name)));
@@ -785,7 +1059,9 @@ impl MssqlAdapter {
             select.join(", "),
             bracket(&name)
         );
-        let rows = query(&mut c, &sql, params).await.inspect_err(|_| c.healthy = false)?;
+        let rows = query(&mut c, &sql, params)
+            .await
+            .inspect_err(|_| c.healthy = false)?;
         Ok(rows
             .iter()
             .map(|row| {
@@ -859,11 +1135,18 @@ fn select_columns(table: &Table, alias: &str) -> String {
 }
 
 fn output_columns(table: &Table, pseudo: &str) -> String {
-    table.stored().map(|c| format!("{pseudo}.{}", bracket(&c.name))).collect::<Vec<_>>().join(", ")
+    table
+        .stored()
+        .map(|c| format!("{pseudo}.{}", bracket(&c.name)))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn key_list(keys: &[String], params: &mut Vec<Param>) -> String {
-    keys.iter().map(|k| param(params, Param::Text(k.clone()))).collect::<Vec<_>>().join(", ")
+    keys.iter()
+        .map(|k| param(params, Param::Text(k.clone())))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// typiql's column type marker → a SQL Server type.
@@ -904,7 +1187,12 @@ fn sortable(expr: &str, col: &Col) -> String {
     }
 }
 
-fn where_and(filters: &[FieldFilter], table: &Table, alias: &str, params: &mut Vec<Param>) -> String {
+fn where_and(
+    filters: &[FieldFilter],
+    table: &Table,
+    alias: &str,
+    params: &mut Vec<Param>,
+) -> String {
     let parts: Vec<String> = filters
         .iter()
         .filter(|f| !is_element_filter(f))
@@ -949,7 +1237,11 @@ fn render_filter(f: &FieldFilter, table: &Table, alias: &str, params: &mut Vec<P
             if items.is_empty() {
                 return (if positive { "1 = 0" } else { "1 = 1" }).to_string();
             }
-            let list = items.iter().map(|v| p(params, v)).collect::<Vec<_>>().join(", ");
+            let list = items
+                .iter()
+                .map(|v| p(params, v))
+                .collect::<Vec<_>>()
+                .join(", ");
             if positive {
                 format!("{cmp} IN ({list})")
             } else {
@@ -969,11 +1261,24 @@ fn render_filter(f: &FieldFilter, table: &Table, alias: &str, params: &mut Vec<P
 
 /// Case-insensitive pattern match, with LIKE's metacharacters escaped so the
 /// needle is plain text. A NULL column matches neither form.
-fn like(c: &str, params: &mut Vec<Param>, needle: &Value, negated: bool, pattern: impl Fn(&str) -> String) -> String {
+fn like(
+    c: &str,
+    params: &mut Vec<Param>,
+    needle: &Value,
+    negated: bool,
+    pattern: impl Fn(&str) -> String,
+) -> String {
     let needle = needle.as_str().unwrap_or("");
-    let escaped = needle.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_").replace('[', "\\[");
+    let escaped = needle
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_")
+        .replace('[', "\\[");
     let p = param(params, Param::Text(pattern(&escaped)));
-    format!("{c} COLLATE {CASE_INSENSITIVE} {}LIKE {p} ESCAPE '\\'", if negated { "NOT " } else { "" })
+    format!(
+        "{c} COLLATE {CASE_INSENSITIVE} {}LIKE {p} ESCAPE '\\'",
+        if negated { "NOT " } else { "" }
+    )
 }
 
 /// A join condition against the parent's own column (a correlated
@@ -981,10 +1286,17 @@ fn like(c: &str, params: &mut Vec<Param>, needle: &Value, negated: bool, pattern
 fn render_against(op: FilterOp, col: &Col, target_alias: &str, rhs: &str) -> String {
     let c = col_sql(&col.name, target_alias);
     let cmp = sortable(&c, col);
-    let rhs_cmp = if col.is_text() { format!("{rhs} COLLATE {BINARY}") } else { rhs.to_string() };
+    let rhs_cmp = if col.is_text() {
+        format!("{rhs} COLLATE {BINARY}")
+    } else {
+        rhs.to_string()
+    };
     let escaped = format!("REPLACE(REPLACE(REPLACE(REPLACE({rhs}, '\\', '\\\\'), '%', '\\%'), '_', '\\_'), '[', '\\[')");
     let like = |negated: bool, pattern: String| {
-        format!("{c} COLLATE {CASE_INSENSITIVE} {}LIKE {pattern} ESCAPE '\\'", if negated { "NOT " } else { "" })
+        format!(
+            "{c} COLLATE {CASE_INSENSITIVE} {}LIKE {pattern} ESCAPE '\\'",
+            if negated { "NOT " } else { "" }
+        )
     };
     match op {
         FilterOp::Eq => format!("{cmp} = {rhs_cmp}"),
@@ -1010,7 +1322,11 @@ fn join_where(join: &Join, target: &Table, parent: &str, params: &mut Vec<Param>
     for c in &join.conditions {
         match &c.value {
             JoinValue::Literal(v) => {
-                let f = FieldFilter { field: c.field.clone(), op: c.op, value: v.clone() };
+                let f = FieldFilter {
+                    field: c.field.clone(),
+                    op: c.op,
+                    value: v.clone(),
+                };
                 parts.push(render_filter(&f, target, "t", params));
             }
             JoinValue::Parent(parent_field) => {
@@ -1020,7 +1336,10 @@ fn join_where(join: &Join, target: &Table, parent: &str, params: &mut Vec<Param>
                 };
                 let rhs = format!("{parent}.{}", bracket(parent_field));
                 // A parent without the value has no related rows.
-                parts.push(format!("({rhs} IS NOT NULL AND {})", render_against(c.op, col, "t", &rhs)));
+                parts.push(format!(
+                    "({rhs} IS NOT NULL AND {})",
+                    render_against(c.op, col, "t", &rhs)
+                ));
             }
         }
     }
@@ -1037,7 +1356,11 @@ fn join_order(join: &Join, target: &Table) -> String {
         .iter()
         .filter_map(|k: &SortKey| {
             let col = target.col(&k.field)?;
-            Some(format!("{} {}", sortable(&col_sql(&col.name, "t"), col), if k.desc { "DESC" } else { "ASC" }))
+            Some(format!(
+                "{} {}",
+                sortable(&col_sql(&col.name, "t"), col),
+                if k.desc { "DESC" } else { "ASC" }
+            ))
         })
         .collect();
     order.push(format!("t.{} ASC", bracket(&join.target_key)));
@@ -1056,7 +1379,11 @@ fn join_page(join: &Join) -> String {
 /// A join as a correlated subquery returning its rows as JSON text.
 fn join_json_sql(join: &Join, target: &Table, parent: &str, params: &mut Vec<Param>) -> String {
     let where_sql = join_where(join, target, parent, params);
-    let wrapper = if join.many { "" } else { ", WITHOUT_ARRAY_WRAPPER" };
+    let wrapper = if join.many {
+        ""
+    } else {
+        ", WITHOUT_ARRAY_WRAPPER"
+    };
     format!(
         "SELECT {} FROM [dbo].{} AS t WHERE {where_sql} ORDER BY {}{} FOR JSON PATH, INCLUDE_NULL_VALUES{wrapper}",
         select_columns(target, "t"),
@@ -1069,7 +1396,14 @@ fn join_json_sql(join: &Join, target: &Table, parent: &str, params: &mut Vec<Par
 /// The value a parent sorts by for `target.col` of a join: the related row's
 /// (has-one), or the smallest / largest of the related rows' (has-many, as
 /// Mongo sorts by an array).
-fn join_sort_sql(join: &Join, target: &Table, col: &Col, desc: bool, parent: &str, params: &mut Vec<Param>) -> String {
+fn join_sort_sql(
+    join: &Join,
+    target: &Table,
+    col: &Col,
+    desc: bool,
+    parent: &str,
+    params: &mut Vec<Param>,
+) -> String {
     let where_sql = join_where(join, target, parent, params);
     let value = sortable(&format!("x.{}", bracket(&col.name)), col);
     let pick = if desc { "MAX" } else { "MIN" };
@@ -1088,7 +1422,10 @@ fn row_json(row: &Row, table: &Table) -> Value {
     let mut map = Map::new();
     for (column, data) in row.cells() {
         let name = column.name().to_string();
-        let ty = table.col(&name).map(|c| c.base().to_string()).unwrap_or_default();
+        let ty = table
+            .col(&name)
+            .map(|c| c.base().to_string())
+            .unwrap_or_default();
         map.insert(name, cell_json(data, &ty));
     }
     Value::Object(map)
@@ -1106,12 +1443,18 @@ fn cell_json(data: &ColumnData<'static>, ty: &str) -> Value {
         ColumnData::Numeric(v) => v
             .map(|n| {
                 let s = n.to_string();
-                s.parse::<i64>().map(Value::from).unwrap_or_else(|_| s.parse::<f64>().map(Value::from).unwrap_or(Value::String(s)))
+                s.parse::<i64>().map(Value::from).unwrap_or_else(|_| {
+                    s.parse::<f64>()
+                        .map(Value::from)
+                        .unwrap_or(Value::String(s))
+                })
             })
             .unwrap_or(Value::Null),
         ColumnData::String(Some(s)) => text_json(s, ty),
         ColumnData::String(None) => Value::Null,
-        ColumnData::Guid(v) => v.map(|g| Value::String(g.to_string())).unwrap_or(Value::Null),
+        ColumnData::Guid(v) => v
+            .map(|g| Value::String(g.to_string()))
+            .unwrap_or(Value::Null),
         _ => Value::Null,
     }
 }
@@ -1138,7 +1481,10 @@ fn joined_json(raw: Value, many: bool, target: &Table) -> Value {
         Value::Object(map) => Value::Object(
             map.into_iter()
                 .map(|(k, v)| {
-                    let ty = target.col(&k).map(|c| c.base().to_string()).unwrap_or_default();
+                    let ty = target
+                        .col(&k)
+                        .map(|c| c.base().to_string())
+                        .unwrap_or_default();
                     let v = match v {
                         Value::String(s) => text_json(&s, &ty),
                         other => other,
@@ -1158,10 +1504,16 @@ fn joined_json(raw: Value, many: bool, target: &Table) -> Value {
 }
 
 fn assign_key(row: &mut Value, key_field: &str) {
-    let missing = row.get(key_field).and_then(Value::as_str).is_none_or(str::is_empty);
+    let missing = row
+        .get(key_field)
+        .and_then(Value::as_str)
+        .is_none_or(str::is_empty);
     if missing {
         if let Value::Object(map) = row {
-            map.insert(key_field.to_string(), Value::String(uuid::Uuid::new_v4().to_string()));
+            map.insert(
+                key_field.to_string(),
+                Value::String(uuid::Uuid::new_v4().to_string()),
+            );
         }
     }
 }
@@ -1202,7 +1554,10 @@ async fn query(c: &mut Conn, sql: &str, params: Vec<Param>) -> Result<Vec<Row>, 
         .query(c)
         .await
         .map_err(|e| format!("{e} (code {:?}) in: {sql}", e.code()))?;
-    stream.into_first_result().await.map_err(|e| format!("{e} (code {:?}) in: {sql}", e.code()))
+    stream
+        .into_first_result()
+        .await
+        .map_err(|e| format!("{e} (code {:?}) in: {sql}", e.code()))
 }
 
 /// Runs a statement for its effect. Without parameters it goes as a plain
@@ -1211,7 +1566,12 @@ async fn query(c: &mut Conn, sql: &str, params: Vec<Param>) -> Result<Vec<Row>, 
 async fn run(c: &mut Conn, sql: &str, params: Vec<Param>) -> Result<(), String> {
     let err = |e: tiberius::error::Error| format!("{e} (code {:?}) in: {sql}", e.code());
     if params.is_empty() {
-        c.simple_query(sql).await.map_err(err)?.into_results().await.map_err(err)?;
+        c.simple_query(sql)
+            .await
+            .map_err(err)?
+            .into_results()
+            .await
+            .map_err(err)?;
         Ok(())
     } else {
         bound(sql, params).execute(c).await.map(|_| ()).map_err(err)
@@ -1225,7 +1585,10 @@ mod tests {
     #[test]
     fn expressions_are_raw_sql() {
         assert_eq!(col_sql("name", "p"), "p.[name]");
-        assert_eq!(col_sql("FirstName + ' ' + LastName", "p"), "(FirstName + ' ' + LastName)");
+        assert_eq!(
+            col_sql("FirstName + ' ' + LastName", "p"),
+            "(FirstName + ' ' + LastName)"
+        );
         assert_eq!(bracket("a]b"), "[a]]b]");
     }
 

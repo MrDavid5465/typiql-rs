@@ -64,7 +64,11 @@ mod schema {
 async fn setup() -> (Arc<MemAdapter>, schema::TypiQLSchema) {
     let adapter = Arc::new(MemAdapter::default());
     adapter
-        .add("drivers".into(), "_id", json!({ "_id": "alice", "full_name": "Alice" }))
+        .add(
+            "drivers".into(),
+            "_id",
+            json!({ "_id": "alice", "full_name": "Alice" }),
+        )
         .await
         .unwrap();
     let mut map: AdapterMap = HashMap::new();
@@ -73,7 +77,12 @@ async fn setup() -> (Arc<MemAdapter>, schema::TypiQLSchema) {
 }
 
 async fn run(schema: &schema::TypiQLSchema, query: &str) -> Value {
-    let req = with_user(async_graphql::Request::new(query), AppUser { username: "alice".into() });
+    let req = with_user(
+        async_graphql::Request::new(query),
+        AppUser {
+            username: "alice".into(),
+        },
+    );
     let res = schema.execute(req).await;
     assert!(res.errors.is_empty(), "{query}: {:?}", res.errors);
     res.data.into_json().unwrap()
@@ -92,16 +101,26 @@ async fn graphql_uses_field_names_the_store_uses_data_names() {
 
     let sdl = schema.sdl();
     for storage in ["MAKE_NAME", "OwnerId", "_id", "full_name"] {
-        assert!(!sdl.contains(storage), "{storage} leaked into the schema:\n{sdl}");
+        assert!(
+            !sdl.contains(storage),
+            "{storage} leaked into the schema:\n{sdl}"
+        );
     }
 
-    let added = run(&schema, r#"mutation { addVehicle(values: { make: "Mazda" }) { id make owner } }"#).await;
+    let added = run(
+        &schema,
+        r#"mutation { addVehicle(values: { make: "Mazda" }) { id make owner } }"#,
+    )
+    .await;
     let id = added["addVehicle"]["id"].as_str().unwrap().to_string();
     assert_eq!(added["addVehicle"]["make"], "Mazda");
     assert_eq!(added["addVehicle"]["owner"], "alice");
 
     let stored = adapter.tables.lock().unwrap()["vehicles"][0].clone();
-    assert_eq!(stored, json!({ "_id": id, "MAKE_NAME": "Mazda", "OwnerId": "alice" }));
+    assert_eq!(
+        stored,
+        json!({ "_id": id, "MAKE_NAME": "Mazda", "OwnerId": "alice" })
+    );
 
     // Update: scoped by the stored owner column, patch written by data_name.
     let updated = run(
@@ -110,16 +129,27 @@ async fn graphql_uses_field_names_the_store_uses_data_names() {
     )
     .await;
     assert_eq!(updated["updateVehicle"]["make"], "Mazda MX-5");
-    assert_eq!(adapter.tables.lock().unwrap()["vehicles"][0]["MAKE_NAME"], "Mazda MX-5");
+    assert_eq!(
+        adapter.tables.lock().unwrap()["vehicles"][0]["MAKE_NAME"],
+        "Mazda MX-5"
+    );
 
     // Filters, by GraphQL name.
     let found = run(&schema, r#"{ getVehicles(make: "Mazda MX-5") { id } }"#).await;
     assert_eq!(found["getVehicles"].as_array().unwrap().len(), 1);
-    let one = run(&schema, &format!(r#"{{ getVehicle(id: "{id}") {{ make }} }}"#)).await;
+    let one = run(
+        &schema,
+        &format!(r#"{{ getVehicle(id: "{id}") {{ make }} }}"#),
+    )
+    .await;
     assert_eq!(one["getVehicle"]["make"], "Mazda MX-5");
 
     // Relations name the target's fields the GraphQL way, both directions.
-    let rel = run(&schema, "{ getVehicles { driver { name } } getDrivers { name vehicles { make } } }").await;
+    let rel = run(
+        &schema,
+        "{ getVehicles { driver { name } } getDrivers { name vehicles { make } } }",
+    )
+    .await;
     assert_eq!(
         rel,
         json!({

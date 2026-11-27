@@ -218,7 +218,12 @@ impl JsonAdapter {
     /// in the same file (e.g. a dashboard's `dashboard` table when writing
     /// its `files` table) are never clobbered. `f` returns whether it changed
     /// anything; only then is the file flushed.
-    fn modify_table<R>(&self, path: &Path, table: &str, f: impl FnOnce(&mut Vec<Value>) -> (bool, R)) -> R {
+    fn modify_table<R>(
+        &self,
+        path: &Path,
+        table: &str,
+        f: impl FnOnce(&mut Vec<Value>) -> (bool, R),
+    ) -> R {
         let mut files = self.files.write();
         let tables = files
             .entry(path.to_path_buf())
@@ -314,7 +319,11 @@ impl TypiQLAdapter for JsonAdapter {
             let mut next = rows
                 .iter()
                 .filter_map(|r| r.get(key_field).and_then(Value::as_i64))
-                .chain(values.iter().filter_map(|r| r.get(key_field).and_then(Value::as_i64)))
+                .chain(
+                    values
+                        .iter()
+                        .filter_map(|r| r.get(key_field).and_then(Value::as_i64)),
+                )
                 .max()
                 .unwrap_or(0);
             for v in &mut values {
@@ -330,8 +339,10 @@ impl TypiQLAdapter for JsonAdapter {
                     }
                 }
             }
-            let mut keys: std::collections::HashSet<String> =
-                rows.iter().filter_map(|r| Self::key_of(r, key_field)).collect();
+            let mut keys: std::collections::HashSet<String> = rows
+                .iter()
+                .filter_map(|r| Self::key_of(r, key_field))
+                .collect();
             for v in &values {
                 let key = Self::key_of(v, key_field).unwrap_or_default();
                 if !keys.insert(key.clone()) {
@@ -372,7 +383,10 @@ impl TypiQLAdapter for JsonAdapter {
     async fn remove(&self, location: Location, key_field: &str, key_value: &str) -> Option<Value> {
         let (path, table) = self.resolve(&location);
         self.modify_table(&path, &table, |rows| {
-            match rows.iter().position(|r| Self::key_of(r, key_field).as_deref() == Some(key_value)) {
+            match rows
+                .iter()
+                .position(|r| Self::key_of(r, key_field).as_deref() == Some(key_value))
+            {
                 Some(i) => (true, Some(rows.remove(i))),
                 None => (false, None),
             }
@@ -381,7 +395,13 @@ impl TypiQLAdapter for JsonAdapter {
 
     /// One locked write for the whole batch, rather than a file rewrite per
     /// row.
-    async fn update_many(&self, location: Location, key_field: &str, keys: Vec<String>, patch: Value) -> Vec<Value> {
+    async fn update_many(
+        &self,
+        location: Location,
+        key_field: &str,
+        keys: Vec<String>,
+        patch: Value,
+    ) -> Vec<Value> {
         let (path, table) = self.resolve(&location);
         let keys: std::collections::HashSet<String> = keys.into_iter().collect();
         self.modify_table(&path, &table, |rows| {
@@ -403,7 +423,12 @@ impl TypiQLAdapter for JsonAdapter {
         })
     }
 
-    async fn remove_many(&self, location: Location, key_field: &str, keys: Vec<String>) -> Vec<Value> {
+    async fn remove_many(
+        &self,
+        location: Location,
+        key_field: &str,
+        keys: Vec<String>,
+    ) -> Vec<Value> {
         let (path, table) = self.resolve(&location);
         let keys: std::collections::HashSet<String> = keys.into_iter().collect();
         self.modify_table(&path, &table, |rows| {
@@ -415,7 +440,12 @@ impl TypiQLAdapter for JsonAdapter {
         })
     }
 
-    fn register_type(&self, table: &str, key_field: &str, columns: &[(&'static str, &'static str)]) {
+    fn register_type(
+        &self,
+        table: &str,
+        key_field: &str,
+        columns: &[(&'static str, &'static str)],
+    ) {
         let integer = columns
             .iter()
             .find(|(name, _)| *name == key_field)
@@ -440,7 +470,16 @@ fn is_integer_type(ty: &str) -> bool {
     let base = ty.strip_suffix(" NOT NULL").unwrap_or(ty);
     matches!(
         base,
-        "TINYINT" | "SMALLINT" | "INTEGER" | "BIGINT" | "HUGEINT" | "UTINYINT" | "USMALLINT" | "UINTEGER" | "UBIGINT" | "UHUGEINT"
+        "TINYINT"
+            | "SMALLINT"
+            | "INTEGER"
+            | "BIGINT"
+            | "HUGEINT"
+            | "UTINYINT"
+            | "USMALLINT"
+            | "UINTEGER"
+            | "UBIGINT"
+            | "UHUGEINT"
     )
 }
 
@@ -450,7 +489,8 @@ mod persistence_tests {
     use serde_json::json;
 
     fn scratch(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("typiql-json-adapter-{name}-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("typiql-json-adapter-{name}-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         dir
     }
@@ -472,7 +512,10 @@ mod persistence_tests {
         std::fs::write(&path, "{\"cars\": [{\"id\": \"1\"}], \"dash").unwrap(); // torn mid-write
 
         let loaded = JsonAdapter::load_file_from_disk(&path);
-        assert!(loaded.is_empty(), "a corrupt file yields no tables to serve");
+        assert!(
+            loaded.is_empty(),
+            "a corrupt file yields no tables to serve"
+        );
 
         // ...but the bytes still exist under a .corrupt-* name, and the
         // original path is now free for a clean write instead of being
@@ -501,7 +544,10 @@ mod persistence_tests {
         let blank = dir.join("blank.json");
         std::fs::write(&blank, "   \n").unwrap();
         assert!(JsonAdapter::load_file_from_disk(&blank).is_empty());
-        assert!(blank.exists(), "a blank file is not corrupt, don't quarantine it");
+        assert!(
+            blank.exists(),
+            "a blank file is not corrupt, don't quarantine it"
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -510,7 +556,10 @@ mod persistence_tests {
     fn flush_round_trips_every_table_and_leaves_no_temp_file() {
         let dir = scratch("flush");
         let path = dir.join("data.json");
-        let data = tables(&[("cars", json!({"id": "1"})), ("dashboards", json!({"id": "2"}))]);
+        let data = tables(&[
+            ("cars", json!({"id": "1"})),
+            ("dashboards", json!({"id": "2"})),
+        ]);
 
         JsonAdapter::flush_file_to_disk(&path, &data);
 
@@ -518,7 +567,10 @@ mod persistence_tests {
         assert_eq!(reloaded.len(), 2);
         assert_eq!(reloaded["cars"][0]["id"], "1");
         assert_eq!(reloaded["dashboards"][0]["id"], "2");
-        assert!(!dir.join("data.json.tmp").exists(), "temp file was renamed, not left behind");
+        assert!(
+            !dir.join("data.json.tmp").exists(),
+            "temp file was renamed, not left behind"
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -531,7 +583,10 @@ mod persistence_tests {
         let path = dir.join("data.json");
         JsonAdapter::flush_file_to_disk(
             &path,
-            &tables(&[("cars", json!({"id": "1"})), ("dashboards", json!({"id": "2"}))]),
+            &tables(&[
+                ("cars", json!({"id": "1"})),
+                ("dashboards", json!({"id": "2"})),
+            ]),
         );
 
         let adapter = JsonAdapter::new(&dir);
@@ -542,7 +597,10 @@ mod persistence_tests {
 
         let reloaded = JsonAdapter::load_file_from_disk(&path);
         assert_eq!(reloaded["cars"][0]["id"], "99", "the written table updated");
-        assert_eq!(reloaded["dashboards"][0]["id"], "2", "the untouched table survived");
+        assert_eq!(
+            reloaded["dashboards"][0]["id"], "2",
+            "the untouched table survived"
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     }

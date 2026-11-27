@@ -52,14 +52,19 @@ pub async fn resolve_list<T: TypiQLType>(
 /// sorting and paging — results never depend on which adapter serves what.
 /// Joined values go to the request's [`JoinCache`] for the relation fields
 /// to pick up.
-pub async fn resolve_query<T: TypiQLType>(ctx: &Context<'_>, mut query: ListQuery) -> GqlResult<Vec<T>> {
+pub async fn resolve_query<T: TypiQLType>(
+    ctx: &Context<'_>,
+    mut query: ListQuery,
+) -> GqlResult<Vec<T>> {
     let adapter = adapter_for::<T>(ctx)?;
     if let Some(spec) = T::aggregate() {
         return adapter
             .aggregate(spec, query)
             .await
             .into_iter()
-            .map(|v| serde_json::from_value(v).map_err(|e| async_graphql::Error::new(e.to_string())))
+            .map(|v| {
+                serde_json::from_value(v).map_err(|e| async_graphql::Error::new(e.to_string()))
+            })
             .collect();
     }
     let adapters = ctx.data::<AdapterMap>()?;
@@ -70,14 +75,20 @@ pub async fn resolve_query<T: TypiQLType>(ctx: &Context<'_>, mut query: ListQuer
         .into_iter()
         .filter(|j| {
             look.field(&j.graphql_name).exists()
-                || query.sort.iter().any(|k| k.field.split('.').next() == Some(j.name.as_str()))
+                || query
+                    .sort
+                    .iter()
+                    .any(|k| k.field.split('.').next() == Some(j.name.as_str()))
         })
         .collect();
     let mut local = Vec::new();
     let mut remote = Vec::new();
     for join in joins.iter().cloned() {
         let target = adapters.get(join.target_adapter).cloned().ok_or_else(|| {
-            async_graphql::Error::new(format!("no adapter registered under name {:?}", join.target_adapter))
+            async_graphql::Error::new(format!(
+                "no adapter registered under name {:?}",
+                join.target_adapter
+            ))
         })?;
         if Arc::ptr_eq(&target, &adapter) {
             local.push(join);
@@ -86,7 +97,9 @@ pub async fn resolve_query<T: TypiQLType>(ctx: &Context<'_>, mut query: ListQuer
         }
     }
     let sorts_by_remote = query.sort.iter().any(|k| {
-        remote.iter().any(|(j, _)| k.field.split('.').next() == Some(j.name.as_str()))
+        remote
+            .iter()
+            .any(|(j, _)| k.field.split('.').next() == Some(j.name.as_str()))
     });
 
     let location: Location = T::collection_name().into();
@@ -115,7 +128,10 @@ pub async fn resolve_query<T: TypiQLType>(ctx: &Context<'_>, mut query: ListQuer
 
     if let Some(cache) = ctx.data_opt::<JoinCache>() {
         for row in &rows {
-            let key = row.get(T::key_field()).map(Value::to_string).unwrap_or_default();
+            let key = row
+                .get(T::key_field())
+                .map(Value::to_string)
+                .unwrap_or_default();
             for join in &joins {
                 if let Some(v) = row.get(&join.name) {
                     cache.insert(T::type_name(), &key, &join.name, v.clone());
@@ -129,11 +145,18 @@ pub async fn resolve_query<T: TypiQLType>(ctx: &Context<'_>, mut query: ListQuer
 }
 
 /// `<list>PageInfo` for the same arguments as a list read.
-pub async fn resolve_page_info<T: TypiQLType>(ctx: &Context<'_>, query: ListQuery) -> GqlResult<PageInfo> {
+pub async fn resolve_page_info<T: TypiQLType>(
+    ctx: &Context<'_>,
+    query: ListQuery,
+) -> GqlResult<PageInfo> {
     let adapter = adapter_for::<T>(ctx)?;
     let total = match T::aggregate() {
         Some(spec) => adapter.aggregate_count(spec, query.filters).await,
-        None => adapter.count(T::collection_name().into(), query.filters).await,
+        None => {
+            adapter
+                .count(T::collection_name().into(), query.filters)
+                .await
+        }
     };
     Ok(PageInfo::new(total, query.skip, query.limit))
 }
@@ -258,7 +281,10 @@ pub async fn resolve_upsert<T: TypiQLType>(
             T::collection_name().into(),
             ListQuery {
                 filters,
-                sort: vec![SortKey { field: T::key_field().to_string(), desc: false }],
+                sort: vec![SortKey {
+                    field: T::key_field().to_string(),
+                    desc: false,
+                }],
                 limit: Some(1),
                 key_field: T::key_field().to_string(),
                 ..Default::default()
@@ -275,7 +301,10 @@ pub async fn resolve_upsert<T: TypiQLType>(
             None => return Ok(None),
         };
         let patch = apply_set(patch, set);
-        return match adapter.update(T::collection_name().into(), T::key_field(), &key, patch).await {
+        return match adapter
+            .update(T::collection_name().into(), T::key_field(), &key, patch)
+            .await
+        {
             Some(v) => Ok(Some(serde_json::from_value(v)?)),
             None => Ok(None),
         };
@@ -286,7 +315,11 @@ pub async fn resolve_upsert<T: TypiQLType>(
 
     let mut row = strip_nulls(patch);
     if let Value::Object(map) = &mut row {
-        for f in identify.iter().chain(&scope).filter(|f| f.op == FilterOp::Eq) {
+        for f in identify
+            .iter()
+            .chain(&scope)
+            .filter(|f| f.op == FilterOp::Eq)
+        {
             map.insert(f.field.clone(), f.value.clone());
         }
     }
@@ -308,13 +341,21 @@ pub async fn resolve_add_many_inputs<T: TypiQLType>(
     let adapter = adapter_for::<T>(ctx)?;
     let rows = items
         .into_iter()
-        .map(|item| complete_row::<T>(apply_set(strip_nulls(serde_json::to_value(item)?), set.clone())))
+        .map(|item| {
+            complete_row::<T>(apply_set(
+                strip_nulls(serde_json::to_value(item)?),
+                set.clone(),
+            ))
+        })
         .collect::<GqlResult<Vec<Value>>>()?;
     let added = adapter
         .add_many(T::collection_name().into(), T::key_field(), rows)
         .await
         .map_err(async_graphql::Error::new)?;
-    added.into_iter().map(|v| Ok(serde_json::from_value(v)?)).collect()
+    added
+        .into_iter()
+        .map(|v| Ok(serde_json::from_value(v)?))
+        .collect()
 }
 
 /// The keys of every row matching `filters` — the rows a bulk update or

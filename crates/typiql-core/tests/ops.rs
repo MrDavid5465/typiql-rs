@@ -93,14 +93,22 @@ mod hidden_schema {
 
 /// Field names on `type Query`/`Mutation`/`Subscription`, with their args.
 fn root_fields(sdl: &str, root: &str) -> Vec<String> {
-    let start = sdl.find(&format!("type TypiQL{root} {{")).unwrap_or_else(|| panic!("no {root} in:\n{sdl}"));
+    let start = sdl
+        .find(&format!("type TypiQL{root} {{"))
+        .unwrap_or_else(|| panic!("no {root} in:\n{sdl}"));
     let body = &sdl[start..];
     let body = &body[body.find('{').unwrap() + 1..body.find("\n}").unwrap()];
-    body.lines().map(str::trim).filter(|l| !l.is_empty()).map(String::from).collect()
+    body.lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(String::from)
+        .collect()
 }
 
 fn field<'a>(fields: &'a [String], name: &str) -> Option<&'a String> {
-    fields.iter().find(|f| f.starts_with(&format!("{name}(")) || f.starts_with(&format!("{name}:")))
+    fields
+        .iter()
+        .find(|f| f.starts_with(&format!("{name}(")) || f.starts_with(&format!("{name}:")))
 }
 
 #[tokio::test]
@@ -134,7 +142,10 @@ async fn only_declared_operations_are_generated() {
     assert!(field(&subscriptions, "widgetChanged").is_some());
     // …but never the bulk operations, which are opt-in only.
     for m in ["addWidgets", "updateWidgets", "removeWidgets"] {
-        assert!(field(&mutations, m).is_none(), "{m} generated without being declared");
+        assert!(
+            field(&mutations, m).is_none(),
+            "{m} generated without being declared"
+        );
     }
 }
 
@@ -145,7 +156,13 @@ async fn declared_filters_narrow_the_arguments() {
 
     // `filters(source)`: every operator for `source`, nothing for the rest.
     let list = field(&queries, "getLogEntries").unwrap();
-    for arg in ["source:", "source_not:", "source_in:", "source_startsWith:", "source_notContains:"] {
+    for arg in [
+        "source:",
+        "source_not:",
+        "source_in:",
+        "source_startsWith:",
+        "source_notContains:",
+    ] {
         assert!(list.contains(arg), "{arg} missing from {list}");
     }
     assert!(!list.contains("message"), "{list}");
@@ -177,7 +194,9 @@ async fn declared_operations_still_resolve() {
     let schema = schema::build_typiql_schema(adapters(adapter.clone()));
 
     let res = schema
-        .execute(r#"mutation { addLogEntry(values: { source: "sim", message: "hi" }) { id source } }"#)
+        .execute(
+            r#"mutation { addLogEntry(values: { source: "sim", message: "hi" }) { id source } }"#,
+        )
         .await;
     assert!(res.errors.is_empty(), "{:?}", res.errors);
     assert_eq!(
@@ -185,7 +204,9 @@ async fn declared_operations_still_resolve() {
         json!({ "addLogEntry": { "id": "new-id", "source": "sim" } })
     );
 
-    let res = schema.execute(r#"{ getLogEntries(source_startsWith: "si") { id } }"#).await;
+    let res = schema
+        .execute(r#"{ getLogEntries(source_startsWith: "si") { id } }"#)
+        .await;
     assert!(res.errors.is_empty(), "{:?}", res.errors);
     {
         let seen = adapter.seen.lock().unwrap();
@@ -197,8 +218,12 @@ async fn declared_operations_still_resolve() {
 
     // An undeclared operation or filter is a schema validation error, not a
     // runtime refusal.
-    let res = schema.execute(r#"mutation { removeLogEntry(id: "x") { id } }"#).await;
+    let res = schema
+        .execute(r#"mutation { removeLogEntry(id: "x") { id } }"#)
+        .await;
     assert!(!res.errors.is_empty());
-    let res = schema.execute(r#"{ getLogEntries(message: "hi") { id } }"#).await;
+    let res = schema
+        .execute(r#"{ getLogEntries(message: "hi") { id } }"#)
+        .await;
     assert!(!res.errors.is_empty());
 }

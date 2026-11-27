@@ -10,7 +10,9 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use async_graphql::extensions::{Extension, ExtensionContext, ExtensionFactory, NextPrepareRequest};
+use async_graphql::extensions::{
+    Extension, ExtensionContext, ExtensionFactory, NextPrepareRequest,
+};
 use async_graphql::{Request, ServerResult};
 use serde_json::Value;
 
@@ -20,14 +22,25 @@ use serde_json::Value;
 pub struct JoinCache(Mutex<HashMap<(&'static str, String, String), Value>>);
 
 impl JoinCache {
-    pub fn insert(&self, parent_type: &'static str, parent_key: &str, relation: &str, value: Value) {
-        self.0
-            .lock()
-            .unwrap()
-            .insert((parent_type, parent_key.to_string(), relation.to_string()), value);
+    pub fn insert(
+        &self,
+        parent_type: &'static str,
+        parent_key: &str,
+        relation: &str,
+        value: Value,
+    ) {
+        self.0.lock().unwrap().insert(
+            (parent_type, parent_key.to_string(), relation.to_string()),
+            value,
+        );
     }
 
-    pub fn get(&self, parent_type: &'static str, parent_key: &str, relation: &str) -> Option<Value> {
+    pub fn get(
+        &self,
+        parent_type: &'static str,
+        parent_key: &str,
+        relation: &str,
+    ) -> Option<Value> {
         self.0
             .lock()
             .unwrap()

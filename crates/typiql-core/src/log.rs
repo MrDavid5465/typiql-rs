@@ -30,8 +30,8 @@ use serde::Serialize;
 use serde_json::{json, Value};
 
 use crate::adapter::TypiQLAdapter;
-use crate::auth::CurrentUser;
 use crate::auth::now_rfc3339;
+use crate::auth::CurrentUser;
 
 /// One log entry — the fields of every `#[typiql_log]` type.
 #[derive(Debug, Clone, Serialize)]
@@ -72,8 +72,16 @@ pub struct StoreLogger {
 }
 
 impl StoreLogger {
-    pub fn new(adapter: Arc<dyn TypiQLAdapter>, collection: &'static str, key_field: &'static str) -> Self {
-        StoreLogger { adapter, collection, key_field }
+    pub fn new(
+        adapter: Arc<dyn TypiQLAdapter>,
+        collection: &'static str,
+        key_field: &'static str,
+    ) -> Self {
+        StoreLogger {
+            adapter,
+            collection,
+            key_field,
+        }
     }
 }
 
@@ -99,7 +107,10 @@ pub struct LogSink {
 
 impl LogSink {
     pub fn new(logger: Arc<dyn TypiQLLogger>, kinds: HashMap<&'static str, &'static str>) -> Self {
-        LogSink { logger, kinds: Arc::new(kinds) }
+        LogSink {
+            logger,
+            kinds: Arc::new(kinds),
+        }
     }
 }
 
@@ -119,7 +130,13 @@ pub fn enable_logging<Q, M, S>(
 
 /// Logs a successful opted-in operation or field — called by generated
 /// resolvers. A no-op unless logging is on.
-pub fn log_success<R: Serialize>(ctx: &Context<'_>, operation: &str, kind: &str, started: Instant, result: &R) {
+pub fn log_success<R: Serialize>(
+    ctx: &Context<'_>,
+    operation: &str,
+    kind: &str,
+    started: Instant,
+    result: &R,
+) {
     let Some(sink) = ctx.data_opt::<LogSink>() else {
         return;
     };
@@ -197,7 +214,9 @@ impl Extension for ErrorLog {
                 _ => None,
             });
             let (operation, arguments) = match (&root, &parsed) {
-                (Some(root), Some((document, variables))) => root_field(document, variables, operation_name, root),
+                (Some(root), Some((document, variables))) => {
+                    root_field(document, variables, operation_name, root)
+                }
                 (Some(root), None) => (root.clone(), json!({})),
                 (None, _) => ("(request)".to_string(), json!({})),
             };
@@ -215,7 +234,12 @@ impl Extension for ErrorLog {
             sink.logger.log(LogEntry {
                 at: now_rfc3339(),
                 user: user.clone(),
-                kind: sink.kinds.get(operation.as_str()).copied().unwrap_or("custom").to_string(),
+                kind: sink
+                    .kinds
+                    .get(operation.as_str())
+                    .copied()
+                    .unwrap_or("custom")
+                    .to_string(),
                 operation,
                 arguments: arguments.to_string(),
                 result: None,
@@ -239,7 +263,10 @@ fn root_field(
     let operation = match &document.operations {
         DocumentOperations::Single(op) => Some(op),
         DocumentOperations::Multiple(ops) => match operation_name {
-            Some(name) => ops.iter().find(|(n, _)| n.as_str() == name).map(|(_, op)| op),
+            Some(name) => ops
+                .iter()
+                .find(|(n, _)| n.as_str() == name)
+                .map(|(_, op)| op),
             None => ops.values().next(),
         },
     };
@@ -259,7 +286,11 @@ fn root_field(
                     let value = value
                         .node
                         .clone()
-                        .into_const_with(|var| Ok::<_, std::convert::Infallible>(variables.get(&var).cloned().unwrap_or_default()))
+                        .into_const_with(|var| {
+                            Ok::<_, std::convert::Infallible>(
+                                variables.get(&var).cloned().unwrap_or_default(),
+                            )
+                        })
                         .ok()
                         .and_then(|v| v.into_json().ok())
                         .unwrap_or(Value::Null);

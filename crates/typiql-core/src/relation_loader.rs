@@ -99,7 +99,10 @@ where
                     sort: key
                         .sort
                         .iter()
-                        .map(|(field, desc)| SortKey { field: field.clone(), desc: *desc })
+                        .map(|(field, desc)| SortKey {
+                            field: field.clone(),
+                            desc: *desc,
+                        })
                         .collect(),
                     skip: key.skip,
                     limit: Some(1),

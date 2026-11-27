@@ -200,8 +200,23 @@ fn is_scalar(ty: &syn::Type) -> bool {
     matches!(
         scalar_type_name(ty).as_deref(),
         Some(
-            "String" | "str" | "bool" | "f32" | "f64" | "i8" | "i16" | "i32" | "i64" | "i128" | "isize"
-                | "u8" | "u16" | "u32" | "u64" | "u128" | "usize"
+            "String"
+                | "str"
+                | "bool"
+                | "f32"
+                | "f64"
+                | "i8"
+                | "i16"
+                | "i32"
+                | "i64"
+                | "i128"
+                | "isize"
+                | "u8"
+                | "u16"
+                | "u32"
+                | "u64"
+                | "u128"
+                | "usize"
         )
     )
 }
@@ -301,10 +316,22 @@ fn op_specs_for(ty: &syn::Type) -> Vec<OpSpec> {
     if is_vec_type(list) && is_scalar(vec_inner_type(list)) {
         let mut specs: Vec<OpSpec> = EQ_NE
             .iter()
-            .map(|s| OpSpec { suffix: s.suffix, op: s.op, is_list: s.is_list })
+            .map(|s| OpSpec {
+                suffix: s.suffix,
+                op: s.op,
+                is_list: s.is_list,
+            })
             .collect();
-        specs.push(OpSpec { suffix: "_any_eq", op: "AnyIn", is_list: false });
-        specs.push(OpSpec { suffix: "_any_ne", op: "NoneIn", is_list: false });
+        specs.push(OpSpec {
+            suffix: "_any_eq",
+            op: "AnyIn",
+            is_list: false,
+        });
+        specs.push(OpSpec {
+            suffix: "_any_ne",
+            op: "NoneIn",
+            is_list: false,
+        });
         return specs;
     }
     let type_name = scalar_type_name(ty);
@@ -416,7 +443,9 @@ impl FieldInfo {
     /// uses the Rust field name, whatever the store calls the field
     /// (differently-cased columns, an alias, a SQL subquery, ...).
     fn storage_name(&self) -> String {
-        self.data_name.clone().unwrap_or_else(|| self.ident.to_string())
+        self.data_name
+            .clone()
+            .unwrap_or_else(|| self.ident.to_string())
     }
 
     fn is_relation(&self) -> bool {
@@ -556,7 +585,10 @@ fn parse_field_info(f: &syn::Field) -> syn::Result<FieldInfo> {
     }
 
     if key_input && !is_key {
-        return Err(syn::Error::new_spanned(&ident, "`input` goes with `key`: `#[typiql(key, input)]`"));
+        return Err(syn::Error::new_spanned(
+            &ident,
+            "`input` goes with `key`: `#[typiql(key, input)]`",
+        ));
     }
     if log && relations.is_empty() && file_table_relation.is_none() {
         return Err(syn::Error::new_spanned(
@@ -565,7 +597,9 @@ fn parse_field_info(f: &syn::Field) -> syn::Result<FieldInfo> {
         ));
     }
     if relations.is_empty()
-        && (!relation_options.sort.is_empty() || relation_options.start.is_some() || relation_options.limit.is_some())
+        && (!relation_options.sort.is_empty()
+            || relation_options.start.is_some()
+            || relation_options.limit.is_some())
     {
         return Err(syn::Error::new_spanned(
             &ident,
@@ -687,7 +721,10 @@ impl OpKind {
 
     /// Operations that select their rows with filter arguments.
     fn takes_filters(self) -> bool {
-        matches!(self, OpKind::Get | OpKind::List | OpKind::UpdateMany | OpKind::RemoveMany)
+        matches!(
+            self,
+            OpKind::Get | OpKind::List | OpKind::UpdateMany | OpKind::RemoveMany
+        )
     }
 
     fn takes_scope(self) -> bool {
@@ -695,7 +732,10 @@ impl OpKind {
     }
 
     fn takes_set(self) -> bool {
-        matches!(self, OpKind::Add | OpKind::Update | OpKind::AddMany | OpKind::UpdateMany)
+        matches!(
+            self,
+            OpKind::Add | OpKind::Update | OpKind::AddMany | OpKind::UpdateMany
+        )
     }
 }
 
@@ -776,9 +816,11 @@ fn parse_paren_list<T: syn::parse::Parse>(
 ) -> syn::Result<Vec<T>> {
     let content;
     syn::parenthesized!(content in meta.input);
-    Ok(syn::punctuated::Punctuated::<T, Token![,]>::parse_terminated(&content)?
-        .into_iter()
-        .collect())
+    Ok(
+        syn::punctuated::Punctuated::<T, Token![,]>::parse_terminated(&content)?
+            .into_iter()
+            .collect(),
+    )
 }
 
 /// `(field = literal, ...)` after a nested meta's path.
@@ -848,7 +890,9 @@ fn parse_ops(meta: &syn::meta::ParseNestedMeta) -> syn::Result<Vec<OpDecl>> {
                     }
                     decl.set = parse_assignments(&opt)?;
                 } else {
-                    return Err(opt.error("expected name, filters, roles, scope, set, by, upsert or log"));
+                    return Err(
+                        opt.error("expected name, filters, roles, scope, set, by, upsert or log")
+                    );
                 }
                 Ok(())
             })?;
@@ -1020,10 +1064,16 @@ pub fn typiql_type(attr: TokenStream, item: TokenStream) -> TokenStream {
     for fi in &field_infos {
         for r in &fi.relations {
             if let ConditionSource::Local(local) = &r.source {
-                if !field_infos.iter().any(|o| o.ident == local.as_str() && !o.is_relation()) {
+                if !field_infos
+                    .iter()
+                    .any(|o| o.ident == local.as_str() && !o.is_relation())
+                {
                     return syn::Error::new_spanned(
                         &fi.ident,
-                        format!("relation `local = \"{local}\"` isn't a plain field of `{}`", input.ident),
+                        format!(
+                            "relation `local = \"{local}\"` isn't a plain field of `{}`",
+                            input.ident
+                        ),
                     )
                     .to_compile_error()
                     .into();
@@ -1184,7 +1234,11 @@ pub fn typiql_type(attr: TokenStream, item: TokenStream) -> TokenStream {
     // plain serde rename: reads fill only the first field, and writes emit
     // the key twice — most JSON parsers keep the last, so saving would
     // clobber the real value. Refused until aliasing gets real support.
-    for (i, fi) in field_infos.iter().enumerate().filter(|(_, fi)| !fi.is_relation()) {
+    for (i, fi) in field_infos
+        .iter()
+        .enumerate()
+        .filter(|(_, fi)| !fi.is_relation())
+    {
         let clash = field_infos[..i]
             .iter()
             .filter(|other| !other.is_relation())
@@ -1218,14 +1272,24 @@ pub fn typiql_type(attr: TokenStream, item: TokenStream) -> TokenStream {
     // refused at runtime (as a C# type only had its configured functions).
     let ops: Vec<OpDecl> = ops_attr.unwrap_or_else(|| {
         // An aggregate type is read-only.
-        let kinds: &[OpKind] = if aggregate_of.is_some() { &[OpKind::Get, OpKind::List] } else { &OpKind::DEFAULT };
+        let kinds: &[OpKind] = if aggregate_of.is_some() {
+            &[OpKind::Get, OpKind::List]
+        } else {
+            &OpKind::DEFAULT
+        };
         kinds.iter().copied().map(OpDecl::plain).collect()
     });
     if aggregate_of.is_some() {
-        if let Some(op) = ops.iter().find(|op| !matches!(op.kind, OpKind::Get | OpKind::List)) {
+        if let Some(op) = ops
+            .iter()
+            .find(|op| !matches!(op.kind, OpKind::Get | OpKind::List))
+        {
             return syn::Error::new_spanned(
                 name,
-                format!("an aggregate type is read-only: `{}` isn't available", op.kind.keyword()),
+                format!(
+                    "an aggregate type is read-only: `{}` isn't available",
+                    op.kind.keyword()
+                ),
             )
             .to_compile_error()
             .into();
@@ -1290,7 +1354,9 @@ pub fn typiql_type(attr: TokenStream, item: TokenStream) -> TokenStream {
         let mut filter_args: Vec<TokenStream2> = Vec::new();
         let mut filter_inserts: Vec<TokenStream2> = Vec::new();
         let fields = filterable.iter().filter(|fi| {
-            op.filters.as_ref().is_none_or(|declared| declared.contains(&fi.ident))
+            op.filters
+                .as_ref()
+                .is_none_or(|declared| declared.contains(&fi.ident))
                 && !op.scope.iter().any(|(s, _)| s == &fi.ident)
         });
         for fi in fields {
@@ -1299,7 +1365,11 @@ pub fn typiql_type(attr: TokenStream, item: TokenStream) -> TokenStream {
             if fi.elements {
                 let elem = vec_inner_type(inner_ty);
                 let camel = to_camel_case(&fi.ident.to_string());
-                for (suffix, at) in [("any", quote! { Any }), ("first", quote! { First }), ("last", quote! { Last })] {
+                for (suffix, at) in [
+                    ("any", quote! { Any }),
+                    ("first", quote! { First }),
+                    ("last", quote! { Last }),
+                ] {
                     let arg_ident = format_ident!("{}_{}", fi.ident, suffix);
                     let gql_name = format!("{camel}_{suffix}");
                     filter_args.push(quote! {
@@ -1332,7 +1402,11 @@ pub fn typiql_type(attr: TokenStream, item: TokenStream) -> TokenStream {
             }
             for spec in op_specs_for(&fi.ty) {
                 let arg_ident = format_ident!("{}{}", fi.ident, spec.suffix);
-                let gql_name = format!("{}{}", to_camel_case(&fi.ident.to_string()), csharp_suffix(spec.op));
+                let gql_name = format!(
+                    "{}{}",
+                    to_camel_case(&fi.ident.to_string()),
+                    csharp_suffix(spec.op)
+                );
                 let op_variant = format_ident!("{}", spec.op);
                 let arg_ty = if spec.is_list {
                     quote! { ::std::option::Option<::std::vec::Vec<#inner_ty>> }
@@ -1500,7 +1574,7 @@ pub fn typiql_type(attr: TokenStream, item: TokenStream) -> TokenStream {
                     let loader = ctx.data::<::async_graphql::dataloader::DataLoader<::typiql::RelationLoader<#target_ty>>>()?;
                     loader.load_one(__key).await
                         .map_err(|e| ::async_graphql::Error::new(e.to_string()))
-                
+
                     }.await;
 
                     if let (true, ::std::result::Result::Ok(__v)) = (#__log_on, &__result) {
@@ -1566,7 +1640,7 @@ pub fn typiql_type(attr: TokenStream, item: TokenStream) -> TokenStream {
                         joins: ::std::vec::Vec::new(),
                     };
                     ::typiql::resolve_query::<#target_ty>(ctx, __query).await
-                
+
                     }.await;
 
                     if let (true, ::std::result::Result::Ok(__v)) = (#__log_on, &__result) {
@@ -1613,7 +1687,7 @@ pub fn typiql_type(attr: TokenStream, item: TokenStream) -> TokenStream {
                     let __file = ::std::path::PathBuf::from(::std::format!(#template, #(#tpl_field_idents = self.#tpl_field_idents),*));
                     let __rows = __adapter.get_many(::typiql::Location::At { file: __file, table: #table.to_string() }, ::std::vec::Vec::new()).await;
                     ::std::result::Result::Ok(__rows.into_iter().next().and_then(|v| ::serde_json::from_value(v).ok()))
-                
+
                     }.await;
 
                     if let (true, ::std::result::Result::Ok(__v)) = (#__log_on, &__result) {
@@ -1929,7 +2003,7 @@ pub fn typiql_type(attr: TokenStream, item: TokenStream) -> TokenStream {
                             #roles
                             #build_query
                             #finish
-                        
+
                             }.await;
 
                             if let (true, ::std::result::Result::Ok(__v)) = (#__log_on, &__result) {
@@ -1974,7 +2048,7 @@ pub fn typiql_type(attr: TokenStream, item: TokenStream) -> TokenStream {
                                 #roles
                                 #build_query
                                 ::typiql::resolve_page_info::<#name>(ctx, __query).await
-                            
+
                                 }.await;
 
                                 if let (true, ::std::result::Result::Ok(__v)) = (#__log_on, &__result) {
@@ -2009,7 +2083,7 @@ pub fn typiql_type(attr: TokenStream, item: TokenStream) -> TokenStream {
                                 value: __item.clone(),
                             });
                             ::std::result::Result::Ok(__item)
-                        
+
                             }.await;
 
                             if let (true, ::std::result::Result::Ok(__v)) = (#__log_on, &__result) {
@@ -2123,7 +2197,7 @@ pub fn typiql_type(attr: TokenStream, item: TokenStream) -> TokenStream {
                                 });
                             }
                             ::std::result::Result::Ok(__item)
-                        
+
                             }.await;
 
                             if let (true, ::std::result::Result::Ok(__v)) = (#__log_on, &__result) {
@@ -2161,7 +2235,7 @@ pub fn typiql_type(attr: TokenStream, item: TokenStream) -> TokenStream {
                                 });
                             }
                             ::std::result::Result::Ok(__item)
-                        
+
                             }.await;
 
                             if let (true, ::std::result::Result::Ok(__v)) = (#__log_on, &__result) {
@@ -2197,7 +2271,7 @@ pub fn typiql_type(attr: TokenStream, item: TokenStream) -> TokenStream {
                                 });
                             }
                             ::std::result::Result::Ok(__items)
-                        
+
                             }.await;
 
                             if let (true, ::std::result::Result::Ok(__v)) = (#__log_on, &__result) {
@@ -2253,7 +2327,7 @@ pub fn typiql_type(attr: TokenStream, item: TokenStream) -> TokenStream {
                                 });
                             }
                             ::std::result::Result::Ok(__items)
-                        
+
                             }.await;
 
                             if let (true, ::std::result::Result::Ok(__v)) = (#__log_on, &__result) {
@@ -2683,10 +2757,14 @@ pub fn derive_typiql_element(item: TokenStream) -> TokenStream {
     let name = &input.ident;
     let vis = &input.vis;
     let Data::Struct(data) = &input.data else {
-        return syn::Error::new_spanned(name, "TypiQLElement needs a struct").to_compile_error().into();
+        return syn::Error::new_spanned(name, "TypiQLElement needs a struct")
+            .to_compile_error()
+            .into();
     };
     let Fields::Named(fields) = &data.fields else {
-        return syn::Error::new_spanned(name, "TypiQLElement needs named fields").to_compile_error().into();
+        return syn::Error::new_spanned(name, "TypiQLElement needs named fields")
+            .to_compile_error()
+            .into();
     };
     let filter_name = format_ident!("{}Filter", name);
     let index_name = format_ident!("{}IndexFilter", name);
@@ -2822,7 +2900,9 @@ pub fn typiql_log(attr: TokenStream, item: TokenStream) -> TokenStream {
             .to_compile_error()
             .into();
     }
-    let adapter = adapter.map(|a| a.value()).unwrap_or_else(|| "default".to_string());
+    let adapter = adapter
+        .map(|a| a.value())
+        .unwrap_or_else(|| "default".to_string());
     let ops = ops.unwrap_or_else(|| quote! { get, list });
     let name = &input.ident;
     let vis = &input.vis;

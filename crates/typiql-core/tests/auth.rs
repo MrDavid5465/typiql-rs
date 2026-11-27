@@ -10,9 +10,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_graphql::futures_util::StreamExt;
+use common::MemAdapter;
 use serde::Serialize;
 use serde_json::{json, Value};
-use common::MemAdapter;
 use typiql::{with_user, AdapterMap, TypiQLAdapter, TypiQLUser};
 
 /// The app's own user type — whatever its auth produces.
@@ -43,7 +43,14 @@ fn user(name: &str, groups: &[&str]) -> AppUser {
 /// Cars are never listed directly — only through `my { cars }` — and can
 /// only be changed by their owner.
 #[typiql::typiql_type(ops(
-    add(roles("User"), set(owner = "@currentUser", region = "@currentUser.region", created_at = "@now")),
+    add(
+        roles("User"),
+        set(
+            owner = "@currentUser",
+            region = "@currentUser.region",
+            created_at = "@now"
+        )
+    ),
     update(roles("User"), scope(owner = "@currentUser")),
     remove(roles("User"), scope(owner = "@currentUser")),
     subscribe(scope(owner = "@currentUser")),
@@ -74,13 +81,18 @@ mod schema {
     typiql::typiql_schema!(Car, Person);
 }
 
-type Schema = async_graphql::Schema<schema::TypiQLQuery, schema::TypiQLMutation, schema::TypiQLSubscription>;
+type Schema =
+    async_graphql::Schema<schema::TypiQLQuery, schema::TypiQLMutation, schema::TypiQLSubscription>;
 
 async fn setup() -> Schema {
     let adapter = Arc::new(MemAdapter::default());
     for name in ["alice", "bob"] {
         adapter
-            .add("persons".into(), "username", json!({ "username": name, "display_name": name }))
+            .add(
+                "persons".into(),
+                "username",
+                json!({ "username": name, "display_name": name }),
+            )
             .await
             .unwrap();
     }
@@ -105,7 +117,9 @@ async fn add_car(schema: &Schema, as_user: &AppUser, make: &str) -> String {
     let data = run(
         schema,
         Some(as_user),
-        &format!(r#"mutation {{ addCar(values: {{ make: "{make}", owner: "mallory" }}) {{ id }} }}"#),
+        &format!(
+            r#"mutation {{ addCar(values: {{ make: "{make}", owner: "mallory" }}) {{ id }} }}"#
+        ),
     )
     .await
     .unwrap();
@@ -116,13 +130,30 @@ async fn add_car(schema: &Schema, as_user: &AppUser, make: &str) -> String {
 async fn roles_gate_operations() {
     let schema = setup().await;
     let add = r#"mutation { addCar(values: { make: "Miata" }) { id } }"#;
-    assert_eq!(run(&schema, None, add).await.unwrap_err(), "Not authenticated");
-    assert_eq!(run(&schema, Some(&user("alice", &[])), add).await.unwrap_err(), "Access denied");
-    assert!(run(&schema, Some(&user("alice", &["User"])), add).await.is_ok());
+    assert_eq!(
+        run(&schema, None, add).await.unwrap_err(),
+        "Not authenticated"
+    );
+    assert_eq!(
+        run(&schema, Some(&user("alice", &[])), add)
+            .await
+            .unwrap_err(),
+        "Access denied"
+    );
+    assert!(run(&schema, Some(&user("alice", &["User"])), add)
+        .await
+        .is_ok());
 
     let users = "{ users { username } }";
-    assert_eq!(run(&schema, Some(&user("alice", &["User"])), users).await.unwrap_err(), "Access denied");
-    let admins = run(&schema, Some(&user("root", &["Admin"])), users).await.unwrap();
+    assert_eq!(
+        run(&schema, Some(&user("alice", &["User"])), users)
+            .await
+            .unwrap_err(),
+        "Access denied"
+    );
+    let admins = run(&schema, Some(&user("root", &["Admin"])), users)
+        .await
+        .unwrap();
     assert_eq!(admins["users"].as_array().unwrap().len(), 2);
 }
 
@@ -149,14 +180,27 @@ async fn my_reads_only_the_current_users_cars() {
     add_car(&schema, &alice, "Miata").await;
     add_car(&schema, &bob, "Civic").await;
 
-    let data = run(&schema, Some(&alice), "{ my { username cars { make } } }").await.unwrap();
-    assert_eq!(data, json!({ "my": { "username": "alice", "cars": [{ "make": "Miata" }] } }));
+    let data = run(&schema, Some(&alice), "{ my { username cars { make } } }")
+        .await
+        .unwrap();
+    assert_eq!(
+        data,
+        json!({ "my": { "username": "alice", "cars": [{ "make": "Miata" }] } })
+    );
 
     // The scoped field isn't a client filter, so it can't be overridden.
-    let err = run(&schema, Some(&alice), r#"{ my(username: "bob") { username } }"#).await;
+    let err = run(
+        &schema,
+        Some(&alice),
+        r#"{ my(username: "bob") { username } }"#,
+    )
+    .await;
     assert!(err.is_err());
     // An unauthenticated scope fails rather than matching everyone.
-    assert_eq!(run(&schema, None, "{ my { username } }").await.unwrap_err(), "Not authenticated");
+    assert_eq!(
+        run(&schema, None, "{ my { username } }").await.unwrap_err(),
+        "Not authenticated"
+    );
 }
 
 #[tokio::test]
@@ -166,15 +210,29 @@ async fn update_and_remove_are_scoped_to_the_owner() {
     let bobs = add_car(&schema, &bob, "Civic").await;
     let alices = add_car(&schema, &alice, "Miata").await;
 
-    let steal = format!(r#"mutation {{ updateCar(id: "{bobs}", update: {{ make: "Stolen" }}) {{ id }} }}"#);
-    assert_eq!(run(&schema, Some(&alice), &steal).await.unwrap(), json!({ "updateCar": null }));
+    let steal =
+        format!(r#"mutation {{ updateCar(id: "{bobs}", update: {{ make: "Stolen" }}) {{ id }} }}"#);
+    assert_eq!(
+        run(&schema, Some(&alice), &steal).await.unwrap(),
+        json!({ "updateCar": null })
+    );
     let drop_it = format!(r#"mutation {{ removeCar(id: "{bobs}") {{ id }} }}"#);
-    assert_eq!(run(&schema, Some(&alice), &drop_it).await.unwrap(), json!({ "removeCar": null }));
-    let bob_sees = run(&schema, Some(&bob), "{ my { cars { make } } }").await.unwrap();
+    assert_eq!(
+        run(&schema, Some(&alice), &drop_it).await.unwrap(),
+        json!({ "removeCar": null })
+    );
+    let bob_sees = run(&schema, Some(&bob), "{ my { cars { make } } }")
+        .await
+        .unwrap();
     assert_eq!(bob_sees["my"]["cars"], json!([{ "make": "Civic" }]));
 
-    let own = format!(r#"mutation {{ updateCar(id: "{alices}", update: {{ make: "MX-5" }}) {{ make }} }}"#);
-    assert_eq!(run(&schema, Some(&alice), &own).await.unwrap(), json!({ "updateCar": { "make": "MX-5" } }));
+    let own = format!(
+        r#"mutation {{ updateCar(id: "{alices}", update: {{ make: "MX-5" }}) {{ make }} }}"#
+    );
+    assert_eq!(
+        run(&schema, Some(&alice), &own).await.unwrap(),
+        json!({ "updateCar": { "make": "MX-5" } })
+    );
 }
 
 #[tokio::test]
@@ -196,7 +254,11 @@ async fn scoped_subscription_only_streams_own_records() {
     ));
     // Let the subscription register with the broker before publishing.
     let first = tokio::time::timeout(Duration::from_millis(50), stream.next()).await;
-    assert!(first.is_err(), "nothing published yet, got {:?}", first.map(|r| r.map(|r| (r.data, r.errors))));
+    assert!(
+        first.is_err(),
+        "nothing published yet, got {:?}",
+        first.map(|r| r.map(|r| (r.data, r.errors)))
+    );
 
     add_car(&schema, &bob, "Civic").await;
     add_car(&schema, &alice, "Miata").await;
@@ -230,20 +292,30 @@ async fn router_attaches_the_apps_user_from_request_extensions() {
         ));
 
     let ask = |authed: bool| {
-        let mut req = axum::http::Request::post("/graphql")
-            .header("content-type", "application/json");
+        let mut req =
+            axum::http::Request::post("/graphql").header("content-type", "application/json");
         if authed {
             req = req.header("x-test-user", "1");
         }
-        let req = req.body(Body::from(r#"{"query":"{ my { username } }"}"#)).unwrap();
+        let req = req
+            .body(Body::from(r#"{"query":"{ my { username } }"}"#))
+            .unwrap();
         let app = app.clone();
         async move {
             let res = app.oneshot(req).await.unwrap();
-            let bytes = axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap();
+            let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+                .await
+                .unwrap();
             serde_json::from_slice::<Value>(&bytes).unwrap()
         }
     };
 
-    assert_eq!(ask(true).await["data"], json!({ "my": { "username": "alice" } }));
-    assert_eq!(ask(false).await["errors"][0]["message"], "Not authenticated");
+    assert_eq!(
+        ask(true).await["data"],
+        json!({ "my": { "username": "alice" } })
+    );
+    assert_eq!(
+        ask(false).await["errors"][0]["message"],
+        "Not authenticated"
+    );
 }

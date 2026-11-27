@@ -7,8 +7,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use typiql_core::query::matches_all;
 use typiql_core::{
-    is_element_filter, AggregateFn, AggregateSpec, FieldFilter, FilterOp, Join, JoinValue, ListQuery, Location,
-    TypiQLAdapter,
+    is_element_filter, AggregateFn, AggregateSpec, FieldFilter, FilterOp, Join, JoinValue,
+    ListQuery, Location, TypiQLAdapter,
 };
 
 /// DuckDB-backed adapter for typiql — one shared `.duckdb` file holding many
@@ -218,8 +218,12 @@ impl DuckDbAdapter {
             && q.joins.iter().all(|j| {
                 self.schemas.read().contains_key(&j.target)
                     && j.conditions.iter().all(|c| {
-                        !(matches!(c.value, JoinValue::Parent(_)) && matches!(c.op, FilterOp::In | FilterOp::NotIn))
-                            && !matches!(c.op, FilterOp::AnyIn | FilterOp::NoneIn | FilterOp::ElemMatch)
+                        !(matches!(c.value, JoinValue::Parent(_))
+                            && matches!(c.op, FilterOp::In | FilterOp::NotIn))
+                            && !matches!(
+                                c.op,
+                                FilterOp::AnyIn | FilterOp::NoneIn | FilterOp::ElemMatch
+                            )
                     })
             })
     }
@@ -324,7 +328,9 @@ impl DuckDbAdapter {
             return None;
         }
         let ty = |f: &str| column_type(&source, f).to_string();
-        let numeric = |f: &str| is_integer_type(column_type(&source, f)) || column_type(&source, f) == "DOUBLE";
+        let numeric = |f: &str| {
+            is_integer_type(column_type(&source, f)) || column_type(&source, f) == "DOUBLE"
+        };
         let mut select = Vec::new();
         let mut columns: Columns = Vec::new();
         for (out, src) in &spec.groups {
@@ -337,11 +343,14 @@ impl DuckDbAdapter {
                 AggregateFn::Count => ("COUNT(*)".to_string(), "BIGINT".to_string()),
                 AggregateFn::CountOf => (format!("COUNT(\"{f}\")"), "BIGINT".to_string()),
                 AggregateFn::Sum if !numeric(&f) => ("0".to_string(), "BIGINT".to_string()),
-                AggregateFn::Sum if is_integer_type(column_type(&source, &f)) => {
-                    (format!("CAST(COALESCE(SUM(\"{f}\"), 0) AS BIGINT)"), "BIGINT".to_string())
-                }
+                AggregateFn::Sum if is_integer_type(column_type(&source, &f)) => (
+                    format!("CAST(COALESCE(SUM(\"{f}\"), 0) AS BIGINT)"),
+                    "BIGINT".to_string(),
+                ),
                 AggregateFn::Sum => (format!("COALESCE(SUM(\"{f}\"), 0)"), "DOUBLE".to_string()),
-                AggregateFn::Avg if !numeric(&f) => ("CAST(NULL AS DOUBLE)".to_string(), "DOUBLE".to_string()),
+                AggregateFn::Avg if !numeric(&f) => {
+                    ("CAST(NULL AS DOUBLE)".to_string(), "DOUBLE".to_string())
+                }
                 AggregateFn::Avg => (format!("AVG(\"{f}\")"), "DOUBLE".to_string()),
                 AggregateFn::Min => (format!("MIN(\"{f}\")"), ty(&f)),
                 AggregateFn::Max => (format!("MAX(\"{f}\")"), ty(&f)),
@@ -352,12 +361,31 @@ impl DuckDbAdapter {
         let group_by = if spec.groups.is_empty() {
             " HAVING COUNT(*) > 0".to_string()
         } else {
-            format!(" GROUP BY {}", spec.groups.iter().map(|(_, src)| format!("\"{src}\"")).collect::<Vec<_>>().join(", "))
+            format!(
+                " GROUP BY {}",
+                spec.groups
+                    .iter()
+                    .map(|(_, src)| format!("\"{src}\""))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
         };
-        Some((format!("SELECT {} FROM \"{}\"{group_by}", select.join(", "), spec.source), columns))
+        Some((
+            format!(
+                "SELECT {} FROM \"{}\"{group_by}",
+                select.join(", "),
+                spec.source
+            ),
+            columns,
+        ))
     }
 
-    fn aggregate_blocking(&self, spec: AggregateSpec, q: ListQuery, count_only: bool) -> Aggregated {
+    fn aggregate_blocking(
+        &self,
+        spec: AggregateSpec,
+        q: ListQuery,
+        count_only: bool,
+    ) -> Aggregated {
         let Ok(conn_arc) = self.connection_for(&self.default_path) else {
             return Aggregated::Rows(vec![]);
         };
@@ -369,7 +397,10 @@ impl DuckDbAdapter {
         let (where_sql, params) = build_where_and(&q.filters, &columns);
         if count_only {
             let sql = format!("SELECT COUNT(*) FROM ({inner}) AS q WHERE {where_sql}");
-            return Aggregated::Count(conn.query_row(&sql, params_from_iter(params), |r| r.get::<_, i64>(0)).unwrap_or(0) as usize);
+            return Aggregated::Count(
+                conn.query_row(&sql, params_from_iter(params), |r| r.get::<_, i64>(0))
+                    .unwrap_or(0) as usize,
+            );
         }
         let has = |f: &str| columns.iter().any(|(n, _)| n == f);
         let mut order: Vec<String> = q
@@ -402,7 +433,9 @@ impl DuckDbAdapter {
             return Aggregated::Rows(vec![]);
         };
         let rows = stmt
-            .query_map(params_from_iter(params), |row| Ok(row_to_json(row, &columns)))
+            .query_map(params_from_iter(params), |row| {
+                Ok(row_to_json(row, &columns))
+            })
             .map(|rows| rows.filter_map(Result::ok).collect())
             .unwrap_or_default();
         Aggregated::Rows(rows)
@@ -447,7 +480,13 @@ impl DuckDbAdapter {
             ));
         }
 
-        assign_keys(&conn, &table, &columns, key_field, std::slice::from_mut(&mut values));
+        assign_keys(
+            &conn,
+            &table,
+            &columns,
+            key_field,
+            std::slice::from_mut(&mut values),
+        );
 
         let row_values = row_values_for_insert(&values, &columns);
         let sql = format!(
@@ -483,11 +522,14 @@ impl DuckDbAdapter {
         assign_keys(&conn, &table, &columns, key_field, &mut out);
         // All-or-nothing, like `JsonAdapter`: a duplicate key anywhere in
         // the batch rolls the whole batch back.
-        conn.execute_batch("BEGIN TRANSACTION").map_err(|e| e.to_string())?;
+        conn.execute_batch("BEGIN TRANSACTION")
+            .map_err(|e| e.to_string())?;
         let appended = (|| {
             let mut appender = conn.appender(&table)?;
             for v in &out {
-                appender.append_row(duckdb::appender_params_from_iter(row_values_for_insert(v, &columns)))?;
+                appender.append_row(duckdb::appender_params_from_iter(row_values_for_insert(
+                    v, &columns,
+                )))?;
             }
             appender.flush()
         })();
@@ -664,11 +706,16 @@ impl TypiQLAdapter for DuckDbAdapter {
     async fn aggregate(&self, spec: AggregateSpec, query: ListQuery) -> Vec<Value> {
         if query.filters.iter().any(is_element_filter) {
             let rows = self.get_many(spec.source.as_str().into(), Vec::new()).await;
-            let rows = spec.compute(rows).into_iter().filter(|r| matches_all(r, &query.filters)).collect();
+            let rows = spec
+                .compute(rows)
+                .into_iter()
+                .filter(|r| matches_all(r, &query.filters))
+                .collect();
             return typiql_core::query::sort_and_page(rows, &query);
         }
         let this = self.clone();
-        match tokio::task::spawn_blocking(move || this.aggregate_blocking(spec, query, false)).await {
+        match tokio::task::spawn_blocking(move || this.aggregate_blocking(spec, query, false)).await
+        {
             Ok(Aggregated::Rows(rows)) => rows,
             _ => Vec::new(),
         }
@@ -676,8 +723,12 @@ impl TypiQLAdapter for DuckDbAdapter {
 
     async fn aggregate_count(&self, spec: AggregateSpec, filters: Vec<FieldFilter>) -> usize {
         let this = self.clone();
-        let query = ListQuery { filters, ..Default::default() };
-        match tokio::task::spawn_blocking(move || this.aggregate_blocking(spec, query, true)).await {
+        let query = ListQuery {
+            filters,
+            ..Default::default()
+        };
+        match tokio::task::spawn_blocking(move || this.aggregate_blocking(spec, query, true)).await
+        {
             Ok(Aggregated::Count(n)) => n,
             _ => 0,
         }
@@ -762,8 +813,15 @@ impl TypiQLAdapter for DuckDbAdapter {
         let _ = tokio::task::spawn_blocking(move || this.set_table_blocking(location, rows)).await;
     }
 
-    fn register_type(&self, table: &str, key_field: &str, columns: &[(&'static str, &'static str)]) {
-        self.keys.write().insert(table.to_string(), key_field.to_string());
+    fn register_type(
+        &self,
+        table: &str,
+        key_field: &str,
+        columns: &[(&'static str, &'static str)],
+    ) {
+        self.keys
+            .write()
+            .insert(table.to_string(), key_field.to_string());
         let owned: Vec<(String, String)> = columns
             .iter()
             .map(|(n, t)| (n.to_string(), t.to_string()))
@@ -843,20 +901,37 @@ fn uint_of(v: &Value) -> u64 {
 }
 
 fn float_of(v: &Value) -> f64 {
-    v.as_f64().or_else(|| v.as_str()?.parse().ok()).unwrap_or(0.0)
+    v.as_f64()
+        .or_else(|| v.as_str()?.parse().ok())
+        .unwrap_or(0.0)
 }
 
 fn is_integer_type(base: &str) -> bool {
     matches!(
         base,
-        "TINYINT" | "SMALLINT" | "INTEGER" | "BIGINT" | "HUGEINT" | "UTINYINT" | "USMALLINT" | "UINTEGER" | "UBIGINT" | "UHUGEINT"
+        "TINYINT"
+            | "SMALLINT"
+            | "INTEGER"
+            | "BIGINT"
+            | "HUGEINT"
+            | "UTINYINT"
+            | "USMALLINT"
+            | "UINTEGER"
+            | "UBIGINT"
+            | "UHUGEINT"
     )
 }
 
 /// Gives every row without a key one: the next number(s) for an integer key
 /// — read under the connection lock the caller holds, so concurrent adds
 /// never collide — or a UUID.
-fn assign_keys(conn: &Connection, table: &str, columns: &[(String, String)], key_field: &str, rows: &mut [Value]) {
+fn assign_keys(
+    conn: &Connection,
+    table: &str,
+    columns: &[(String, String)],
+    key_field: &str,
+    rows: &mut [Value],
+) {
     let missing = |v: &Value| match v.get(key_field) {
         None | Some(Value::Null) => true,
         Some(Value::String(s)) => s.is_empty(),
@@ -868,9 +943,15 @@ fn assign_keys(conn: &Connection, table: &str, columns: &[(String, String)], key
     let integer = is_integer_type(column_type(columns, key_field));
     let mut next = if integer {
         let stored: i64 = conn
-            .query_row(&format!("SELECT COALESCE(MAX(\"{key_field}\"), 0) FROM \"{table}\""), [], |r| r.get(0))
+            .query_row(
+                &format!("SELECT COALESCE(MAX(\"{key_field}\"), 0) FROM \"{table}\""),
+                [],
+                |r| r.get(0),
+            )
             .unwrap_or(0);
-        rows.iter().filter_map(|r| r.get(key_field).and_then(Value::as_i64)).fold(stored, i64::max)
+        rows.iter()
+            .filter_map(|r| r.get(key_field).and_then(Value::as_i64))
+            .fold(stored, i64::max)
     } else {
         0
     };
@@ -1045,7 +1126,10 @@ fn in_clause(
         (format!("{} IN ({})", field_sql, placeholders), params)
     } else {
         // As with `Ne`: a row with no value is "not in" the list (Mongo `$nin`).
-        (format!("({0} NOT IN ({1}) OR {0} IS NULL)", field_sql, placeholders), params)
+        (
+            format!("({0} NOT IN ({1}) OR {0} IS NULL)", field_sql, placeholders),
+            params,
+        )
     }
 }
 
@@ -1076,7 +1160,11 @@ fn join_subquery(join: &Join, target_columns: &[(String, String)]) -> (String, V
         match &c.value {
             JoinValue::Literal(v) => {
                 let (sql, p) = render_filter(
-                    &FieldFilter { field: c.field.clone(), op: c.op, value: v.clone() },
+                    &FieldFilter {
+                        field: c.field.clone(),
+                        op: c.op,
+                        value: v.clone(),
+                    },
                     target_columns,
                 );
                 conditions.push(sql);
@@ -1085,11 +1173,18 @@ fn join_subquery(join: &Join, target_columns: &[(String, String)]) -> (String, V
             // A parent without the value has no related rows.
             JoinValue::Parent(parent_field) => {
                 let rhs = format!("p.\"{parent_field}\"");
-                conditions.push(format!("({rhs} IS NOT NULL AND {})", render_against(c.op, &c.field, &rhs)));
+                conditions.push(format!(
+                    "({rhs} IS NOT NULL AND {})",
+                    render_against(c.op, &c.field, &rhs)
+                ));
             }
         }
     }
-    let where_sql = if conditions.is_empty() { "1 = 1".to_string() } else { conditions.join(" AND ") };
+    let where_sql = if conditions.is_empty() {
+        "1 = 1".to_string()
+    } else {
+        conditions.join(" AND ")
+    };
     let fields = target_columns
         .iter()
         .map(|(n, _)| format!("\"{n}\" := t.\"{n}\""))
@@ -1111,7 +1206,11 @@ fn join_subquery(join: &Join, target_columns: &[(String, String)]) -> (String, V
     if has(&join.target_key) {
         order.push(format!("t.\"{}\" ASC", join.target_key));
     }
-    let order_sql = if order.is_empty() { String::new() } else { format!(" ORDER BY {}", order.join(", ")) };
+    let order_sql = if order.is_empty() {
+        String::new()
+    } else {
+        format!(" ORDER BY {}", order.join(", "))
+    };
     let table = &join.target;
     let sql = if join.many {
         let mut page = String::new();
@@ -1139,7 +1238,10 @@ fn render_against(op: FilterOp, field: &str, rhs: &str) -> String {
     let f = format!("t.\"{field}\"");
     let escaped = format!("replace(replace(replace({rhs}, '\\', '\\\\'), '%', '\\%'), '_', '\\_')");
     let like = |negated: bool, pattern: String| {
-        format!("{f} {}ILIKE {pattern} ESCAPE '\\'", if negated { "NOT " } else { "" })
+        format!(
+            "{f} {}ILIKE {pattern} ESCAPE '\\'",
+            if negated { "NOT " } else { "" }
+        )
     };
     match op {
         FilterOp::Eq => format!("{f} = {rhs}"),
@@ -1155,9 +1257,11 @@ fn render_against(op: FilterOp, field: &str, rhs: &str) -> String {
         FilterOp::Contains => like(false, format!("('%' || {escaped} || '%')")),
         FilterOp::NotContains => like(true, format!("('%' || {escaped} || '%')")),
         // Excluded by `can_join_in_sql`.
-        FilterOp::In | FilterOp::NotIn | FilterOp::AnyIn | FilterOp::NoneIn | FilterOp::ElemMatch => {
-            "1 = 0".to_string()
-        }
+        FilterOp::In
+        | FilterOp::NotIn
+        | FilterOp::AnyIn
+        | FilterOp::NoneIn
+        | FilterOp::ElemMatch => "1 = 0".to_string(),
     }
 }
 

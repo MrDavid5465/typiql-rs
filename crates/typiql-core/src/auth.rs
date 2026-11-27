@@ -89,7 +89,10 @@ impl CurrentUser {
 /// custom resolvers) and as [`CurrentUser`] (for generated code). The router
 /// does this per request; call it directly when executing a schema without
 /// the router (tests, an in-process transport).
-pub fn with_user<U: TypiQLUser>(request: async_graphql::Request, user: U) -> async_graphql::Request {
+pub fn with_user<U: TypiQLUser>(
+    request: async_graphql::Request,
+    user: U,
+) -> async_graphql::Request {
     request.data(CurrentUser::new(user.clone())).data(user)
 }
 

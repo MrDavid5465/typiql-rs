@@ -32,17 +32,27 @@ fn matches(row: &Value, filters: &[FieldFilter]) -> bool {
 impl TypiQLAdapter for MemAdapter {
     async fn get_one(&self, l: Location, key: &str, value: &str) -> Option<Value> {
         let tables = self.tables.lock().unwrap();
-        tables.get(&table(&l))?.iter().find(|r| r[key] == value).cloned()
+        tables
+            .get(&table(&l))?
+            .iter()
+            .find(|r| r[key] == value)
+            .cloned()
     }
     async fn get_many(&self, l: Location, filters: Vec<FieldFilter>) -> Vec<Value> {
         let tables = self.tables.lock().unwrap();
         let rows = tables.get(&table(&l)).cloned().unwrap_or_default();
         rows.into_iter().filter(|r| matches(r, &filters)).collect()
     }
-    async fn get_many_matching_any(&self, l: Location, groups: Vec<Vec<FieldFilter>>) -> Vec<Value> {
+    async fn get_many_matching_any(
+        &self,
+        l: Location,
+        groups: Vec<Vec<FieldFilter>>,
+    ) -> Vec<Value> {
         let tables = self.tables.lock().unwrap();
         let rows = tables.get(&table(&l)).cloned().unwrap_or_default();
-        rows.into_iter().filter(|r| groups.iter().any(|g| matches(r, g))).collect()
+        rows.into_iter()
+            .filter(|r| groups.iter().any(|g| matches(r, g)))
+            .collect()
     }
     async fn add(&self, l: Location, key: &str, mut values: Value) -> Result<Value, String> {
         if values.get(key).is_none() {
@@ -50,12 +60,20 @@ impl TypiQLAdapter for MemAdapter {
             *next += 1;
             values[key] = json!(format!("id-{next}"));
         }
-        self.tables.lock().unwrap().entry(table(&l)).or_default().push(values.clone());
+        self.tables
+            .lock()
+            .unwrap()
+            .entry(table(&l))
+            .or_default()
+            .push(values.clone());
         Ok(values)
     }
     async fn update(&self, l: Location, key: &str, value: &str, patch: Value) -> Option<Value> {
         let mut tables = self.tables.lock().unwrap();
-        let row = tables.get_mut(&table(&l))?.iter_mut().find(|r| r[key] == value)?;
+        let row = tables
+            .get_mut(&table(&l))?
+            .iter_mut()
+            .find(|r| r[key] == value)?;
         for (k, v) in patch.as_object()? {
             row[k] = v.clone();
         }

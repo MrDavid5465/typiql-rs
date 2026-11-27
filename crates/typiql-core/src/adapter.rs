@@ -8,7 +8,11 @@ use crate::query::{matches_all, sort_and_page, AggregateSpec, ListQuery};
 /// adapter in one `get_many_matching_any` per join), then sort and page.
 /// The trait's default; adapters that push some of this into their store
 /// can still fall back to it for what they don't.
-pub async fn query_in_memory<A: TypiQLAdapter + ?Sized>(adapter: &A, location: Location, query: ListQuery) -> Vec<Value> {
+pub async fn query_in_memory<A: TypiQLAdapter + ?Sized>(
+    adapter: &A,
+    location: Location,
+    query: ListQuery,
+) -> Vec<Value> {
     let mut rows = adapter.get_many(location, query.filters.clone()).await;
     for join in &query.joins {
         let candidates = adapter
@@ -117,13 +121,20 @@ pub trait TypiQLAdapter: Send + Sync {
     /// source's rows in memory; SQL adapters push it into `GROUP BY`.
     async fn aggregate(&self, spec: AggregateSpec, query: ListQuery) -> Vec<Value> {
         let rows = self.get_many(spec.source.as_str().into(), Vec::new()).await;
-        let rows: Vec<Value> = spec.compute(rows).into_iter().filter(|r| matches_all(r, &query.filters)).collect();
+        let rows: Vec<Value> = spec
+            .compute(rows)
+            .into_iter()
+            .filter(|r| matches_all(r, &query.filters))
+            .collect();
         sort_and_page(rows, &query)
     }
 
     /// How many rows an aggregate type has after `filters`.
     async fn aggregate_count(&self, spec: AggregateSpec, filters: Vec<FieldFilter>) -> usize {
-        let query = ListQuery { filters, ..Default::default() };
+        let query = ListQuery {
+            filters,
+            ..Default::default()
+        };
         self.aggregate(spec, query).await.len()
     }
 
@@ -196,7 +207,10 @@ pub trait TypiQLAdapter: Send + Sync {
     ) -> Vec<Value> {
         let mut out = Vec::with_capacity(keys.len());
         for key in keys {
-            if let Some(v) = self.update(location.clone(), key_field, &key, patch.clone()).await {
+            if let Some(v) = self
+                .update(location.clone(), key_field, &key, patch.clone())
+                .await
+            {
                 out.push(v);
             }
         }
@@ -205,7 +219,12 @@ pub trait TypiQLAdapter: Send + Sync {
 
     /// Removes every row keyed by `keys` (C#'s RemoveMany), returning them.
     /// The default removes them one at a time.
-    async fn remove_many(&self, location: Location, key_field: &str, keys: Vec<String>) -> Vec<Value> {
+    async fn remove_many(
+        &self,
+        location: Location,
+        key_field: &str,
+        keys: Vec<String>,
+    ) -> Vec<Value> {
         let mut out = Vec::with_capacity(keys.len());
         for key in keys {
             if let Some(v) = self.remove(location.clone(), key_field, &key).await {

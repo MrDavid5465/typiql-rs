@@ -27,11 +27,28 @@ async fn custom_logger_replaces_the_built_in_one() {
     .finish();
     let h = Harness::with_schema(built, store);
 
-    h.run_as(&user("alice"), r#"mutation { addNote(values: { body: "hi" }) { id } }"#).await;
-    let _ = h.try_run(None, r#"{ getItems(_orderBy: "nope") { id } }"#).await;
+    h.run_as(
+        &user("alice"),
+        r#"mutation { addNote(values: { body: "hi" }) { id } }"#,
+    )
+    .await;
+    let _ = h
+        .try_run(None, r#"{ getItems(_orderBy: "nope") { id } }"#)
+        .await;
 
     let entries = captured.0.lock().unwrap().clone();
-    let ops: Vec<(&str, bool)> = entries.iter().map(|e| (e.operation.as_str(), e.error.is_some())).collect();
-    assert_eq!(ops, [("addNote", false), ("getItems", true)], "{entries:#?}");
-    assert_eq!(h.run("{ getLogs { id } }").await["getLogs"], serde_json::json!([]), "nothing went to the built-in store");
+    let ops: Vec<(&str, bool)> = entries
+        .iter()
+        .map(|e| (e.operation.as_str(), e.error.is_some()))
+        .collect();
+    assert_eq!(
+        ops,
+        [("addNote", false), ("getItems", true)],
+        "{entries:#?}"
+    );
+    assert_eq!(
+        h.run("{ getLogs { id } }").await["getLogs"],
+        serde_json::json!([]),
+        "nothing went to the built-in store"
+    );
 }

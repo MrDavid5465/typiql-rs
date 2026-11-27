@@ -3,12 +3,18 @@
 //! Each test creates its own database.
 
 mod mssql {
-    typiql_conformance::conformance_suite!(typiql_conformance::mssql_store, requires = "TYPIQL_TEST_MSSQL");
+    typiql_conformance::conformance_suite!(
+        typiql_conformance::mssql_store,
+        requires = "TYPIQL_TEST_MSSQL"
+    );
 }
 
 /// A relation crossing from SQL Server to JSON.
 mod mssql_then_json {
-    typiql_conformance::conformance_suite!(typiql_conformance::mssql_then_json_store, requires = "TYPIQL_TEST_MSSQL");
+    typiql_conformance::conformance_suite!(
+        typiql_conformance::mssql_then_json_store,
+        requires = "TYPIQL_TEST_MSSQL"
+    );
 }
 
 /// C#'s stored-procedure model: a type whose rows come from a procedure,
@@ -72,19 +78,32 @@ mod procedures {
         };
 
         // Key fields are the parameters, in order.
-        let west = run(r#"{ getSalesSummaries(region: "west", year: 2024) { region year total sales } }"#).await;
-        assert_eq!(west["getSalesSummaries"], json!([{ "region": "west", "year": 2024, "total": 15.5, "sales": 2 }]));
+        let west =
+            run(r#"{ getSalesSummaries(region: "west", year: 2024) { region year total sales } }"#)
+                .await;
+        assert_eq!(
+            west["getSalesSummaries"],
+            json!([{ "region": "west", "year": 2024, "total": 15.5, "sales": 2 }])
+        );
         // Other filters don't apply, as in C#.
-        let ignored = run(r#"{ getSalesSummaries(region: "west", year: 2024, total_gt: 100) { total } }"#).await;
+        let ignored =
+            run(r#"{ getSalesSummaries(region: "west", year: 2024, total_gt: 100) { total } }"#)
+                .await;
         assert_eq!(ignored["getSalesSummaries"], json!([{ "total": 15.5 }]));
         let one = run(r#"{ getSalesSummary(region: "east", year: 2024) { total } }"#).await;
         assert_eq!(one["getSalesSummary"], json!({ "total": 7.0 }));
-        let info = run(r#"{ getSalesSummariesPageInfo(region: "west", year: 2023) { totalResults } }"#).await;
+        let info =
+            run(r#"{ getSalesSummariesPageInfo(region: "west", year: 2023) { totalResults } }"#)
+                .await;
         assert_eq!(info["getSalesSummariesPageInfo"]["totalResults"], 1);
 
         // Read-only, and no table was created for it.
         let err = adapter
-            .add("sales_summaries".into(), "region", json!({ "region": "x", "year": 1, "total": 0, "sales": 0 }))
+            .add(
+                "sales_summaries".into(),
+                "region",
+                json!({ "region": "x", "year": 1, "total": 0, "sales": 0 }),
+            )
             .await
             .unwrap_err();
         assert!(err.contains("read-only"), "{err}");

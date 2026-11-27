@@ -80,7 +80,11 @@ impl Join {
                         Some(v) => v.clone(),
                     },
                 };
-                Some(FieldFilter { field: c.field.clone(), op: c.op, value })
+                Some(FieldFilter {
+                    field: c.field.clone(),
+                    op: c.op,
+                    value,
+                })
             })
             .collect()
     }
@@ -93,7 +97,11 @@ impl Join {
             let related: Vec<Value> = match self.filters_for(parent) {
                 None => Vec::new(),
                 Some(filters) => {
-                    let matching = candidates.iter().filter(|c| matches_all(c, &filters)).cloned().collect();
+                    let matching = candidates
+                        .iter()
+                        .filter(|c| matches_all(c, &filters))
+                        .cloned()
+                        .collect();
                     let query = ListQuery {
                         sort: self.sort.clone(),
                         skip: self.skip,
@@ -179,7 +187,12 @@ pub fn list_query(
 ) -> GqlResult<ListQuery> {
     let mut sort = Vec::new();
     for (list, desc) in [(order_by, false), (order_by_desc, true)] {
-        for name in list.iter().flat_map(|l| l.split(',')).map(str::trim).filter(|n| !n.is_empty()) {
+        for name in list
+            .iter()
+            .flat_map(|l| l.split(','))
+            .map(str::trim)
+            .filter(|n| !n.is_empty())
+        {
             let field = storage_name(name)
                 .ok_or_else(|| Error::new(format!("Unknown sort field `{name}`")))?;
             sort.push(SortKey { field, desc });
@@ -274,7 +287,9 @@ pub fn compare(a: Option<&Value>, b: Option<&Value>) -> Ordering {
         },
         (Some(Value::String(x)), Some(Value::String(y))) => x.cmp(y),
         (Some(Value::Bool(x)), Some(Value::Bool(y))) => x.cmp(y),
-        (Some(x @ (Value::Object(_) | Value::Array(_))), Some(y)) if rank(Some(x)) == rank(Some(y)) => {
+        (Some(x @ (Value::Object(_) | Value::Array(_))), Some(y))
+            if rank(Some(x)) == rank(Some(y)) =>
+        {
             x.to_string().cmp(&y.to_string())
         }
         _ => rank(a).cmp(&rank(b)),
@@ -357,7 +372,12 @@ impl Measure {
         let values: Vec<&Value> = self
             .field
             .as_ref()
-            .map(|f| rows.iter().filter_map(|r| r.get(f)).filter(|v| !v.is_null()).collect())
+            .map(|f| {
+                rows.iter()
+                    .filter_map(|r| r.get(f))
+                    .filter(|v| !v.is_null())
+                    .collect()
+            })
             .unwrap_or_default();
         let numbers = || values.iter().filter_map(|v| v.as_f64());
         match self.func {
@@ -380,8 +400,16 @@ impl Measure {
                     Value::from(n.iter().sum::<f64>() / n.len() as f64)
                 }
             }
-            AggregateFn::Min => values.into_iter().min_by(|a, b| compare(Some(a), Some(b))).cloned().unwrap_or(Value::Null),
-            AggregateFn::Max => values.into_iter().max_by(|a, b| compare(Some(a), Some(b))).cloned().unwrap_or(Value::Null),
+            AggregateFn::Min => values
+                .into_iter()
+                .min_by(|a, b| compare(Some(a), Some(b)))
+                .cloned()
+                .unwrap_or(Value::Null),
+            AggregateFn::Max => values
+                .into_iter()
+                .max_by(|a, b| compare(Some(a), Some(b)))
+                .cloned()
+                .unwrap_or(Value::Null),
         }
     }
 }
@@ -410,7 +438,11 @@ pub struct ElementMatch {
 
 impl ElementMatch {
     /// The filter matching rows whose `field` list has such an element.
-    pub fn filter(field: impl Into<String>, at: ElementAt, filters: Vec<FieldFilter>) -> FieldFilter {
+    pub fn filter(
+        field: impl Into<String>,
+        at: ElementAt,
+        filters: Vec<FieldFilter>,
+    ) -> FieldFilter {
         FieldFilter {
             field: field.into(),
             op: FilterOp::ElemMatch,
@@ -445,7 +477,10 @@ impl ElementMatch {
 /// Whether a filter can only be evaluated in memory (it looks inside a list)
 /// — adapters storing lists as opaque text apply these after their own query.
 pub fn is_element_filter(f: &FieldFilter) -> bool {
-    matches!(f.op, FilterOp::AnyIn | FilterOp::NoneIn | FilterOp::ElemMatch)
+    matches!(
+        f.op,
+        FilterOp::AnyIn | FilterOp::NoneIn | FilterOp::ElemMatch
+    )
 }
 
 // ── in-memory filter evaluation ───────────────────────────────────────────
@@ -499,20 +534,12 @@ pub fn matches_filter(item: &Value, filter: &FieldFilter) -> bool {
             .as_array()
             .map(|arr| item_val.map(|v| !arr.contains(v)).unwrap_or(true))
             .unwrap_or(true),
-        FilterOp::StartsWith => {
-            str_match(item_val, &filter.value, |s, n| s.starts_with(n))
-        }
+        FilterOp::StartsWith => str_match(item_val, &filter.value, |s, n| s.starts_with(n)),
         FilterOp::EndsWith => str_match(item_val, &filter.value, |s, n| s.ends_with(n)),
         FilterOp::Contains => str_match(item_val, &filter.value, |s, n| s.contains(n)),
-        FilterOp::NotStartsWith => {
-            str_match(item_val, &filter.value, |s, n| !s.starts_with(n))
-        }
-        FilterOp::NotEndsWith => {
-            str_match(item_val, &filter.value, |s, n| !s.ends_with(n))
-        }
-        FilterOp::NotContains => {
-            str_match(item_val, &filter.value, |s, n| !s.contains(n))
-        }
+        FilterOp::NotStartsWith => str_match(item_val, &filter.value, |s, n| !s.starts_with(n)),
+        FilterOp::NotEndsWith => str_match(item_val, &filter.value, |s, n| !s.ends_with(n)),
+        FilterOp::NotContains => str_match(item_val, &filter.value, |s, n| !s.contains(n)),
         // Mongo `$in` / `$nin` against a list: any element in the given
         // values / none of them (a missing list contains none).
         FilterOp::AnyIn | FilterOp::NoneIn => {
@@ -550,15 +577,55 @@ mod tests {
 
     #[test]
     fn page_info_follows_csharp() {
-        assert_eq!(PageInfo::new(0, 0, Some(10)), PageInfo { total_results: 0, page: 1, total_pages: 1 });
-        assert_eq!(PageInfo::new(25, 20, Some(10)), PageInfo { total_results: 25, page: 3, total_pages: 3 });
-        assert_eq!(PageInfo::new(25, 5, None), PageInfo { total_results: 25, page: 1, total_pages: 1 });
+        assert_eq!(
+            PageInfo::new(0, 0, Some(10)),
+            PageInfo {
+                total_results: 0,
+                page: 1,
+                total_pages: 1
+            }
+        );
+        assert_eq!(
+            PageInfo::new(25, 20, Some(10)),
+            PageInfo {
+                total_results: 25,
+                page: 3,
+                total_pages: 3
+            }
+        );
+        assert_eq!(
+            PageInfo::new(25, 5, None),
+            PageInfo {
+                total_results: 25,
+                page: 1,
+                total_pages: 1
+            }
+        );
     }
 
     #[test]
     fn mongo_type_order() {
-        let mut v = vec![json!(true), json!("b"), json!(2), json!(null), json!("B"), json!(10), json!(false)];
+        let mut v = vec![
+            json!(true),
+            json!("b"),
+            json!(2),
+            json!(null),
+            json!("B"),
+            json!(10),
+            json!(false),
+        ];
         v.sort_by(|a, b| compare(Some(a), Some(b)));
-        assert_eq!(v, vec![json!(null), json!(2), json!(10), json!("B"), json!("b"), json!(false), json!(true)]);
+        assert_eq!(
+            v,
+            vec![
+                json!(null),
+                json!(2),
+                json!(10),
+                json!("B"),
+                json!("b"),
+                json!(false),
+                json!(true)
+            ]
+        );
     }
 }
