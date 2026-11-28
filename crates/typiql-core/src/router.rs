@@ -6,7 +6,7 @@ use async_graphql::http::{
     create_multipart_mixed_stream, is_accept_multipart_mixed, playground_source,
     GraphQLPlaygroundConfig,
 };
-use async_graphql::{Executor, ObjectType, SubscriptionType};
+use async_graphql::{BatchRequest, Executor, ObjectType, SubscriptionType};
 use async_graphql_axum::{rejection::GraphQLRejection, GraphQLBatchRequest, GraphQLRequest};
 use axum::{
     body::Body,
@@ -17,6 +17,8 @@ use axum::{
     Router,
 };
 use futures_util::{future::BoxFuture, StreamExt};
+
+use crate::auth::{with_user, TypiQLUser};
 
 async fn make_playground(graphql_path: String) -> Html<String> {
     Html(playground_source(GraphQLPlaygroundConfig::new(
@@ -31,6 +33,26 @@ async fn make_playground(graphql_path: String) -> Html<String> {
 #[derive(Clone)]
 struct TypiQLGraphQL<E> {
     executor: E,
+    attach: AttachFn,
+}
+
+/// Copies whatever per-request state typiql needs (today: the app's user,
+/// see `TypiQLRouter::with_user`) from the HTTP request's extensions into a
+/// GraphQL request.
+type AttachFn = fn(&http::Extensions, async_graphql::Request) -> async_graphql::Request;
+
+fn attach_nothing(_: &http::Extensions, req: async_graphql::Request) -> async_graphql::Request {
+    req
+}
+
+fn attach_user<U: TypiQLUser>(
+    ext: &http::Extensions,
+    req: async_graphql::Request,
+) -> async_graphql::Request {
+    match ext.get::<U>() {
+        Some(user) => with_user(req, user.clone()),
+        None => req,
+    }
 }
 
 impl<E> tower::Service<Request<Body>> for TypiQLGraphQL<E>
@@ -47,6 +69,8 @@ where
 
     fn call(&mut self, req: Request<Body>) -> Self::Future {
         let executor = self.executor.clone();
+        let attach = self.attach;
+        let ext = req.extensions().clone();
         Box::pin(async move {
             let is_multipart = req
                 .headers()
@@ -61,7 +85,7 @@ where
                     Ok(r) => r,
                     Err(e) => return Ok(axum::response::IntoResponse::into_response(e)),
                 };
-                let stream = executor.execute_stream(gql_req.0, None);
+                let stream = executor.execute_stream(attach(&ext, gql_req.0), None);
                 let body = Body::from_stream(
                     create_multipart_mixed_stream(stream, Duration::from_secs(1))
                         .map(Ok::<_, std::io::Error>),
@@ -76,8 +100,13 @@ where
                         Ok(r) => r,
                         Err(e) => return Ok(axum::response::IntoResponse::into_response(e)),
                     };
-                let resp =
-                    async_graphql_axum::GraphQLResponse(executor.execute_batch(batch.0).await);
+                let batch = match batch.0 {
+                    BatchRequest::Single(r) => BatchRequest::Single(attach(&ext, r)),
+                    BatchRequest::Batch(rs) => {
+                        BatchRequest::Batch(rs.into_iter().map(|r| attach(&ext, r)).collect())
+                    }
+                };
+                let resp = async_graphql_axum::GraphQLResponse(executor.execute_batch(batch).await);
                 Ok(axum::response::IntoResponse::into_response(resp))
             }
         })
@@ -95,14 +124,71 @@ where
 /// ```rust,ignore
 /// router.nest("/typiql", typiql_router(schema, "/typiql/graphql"))
 /// ```
+///
+/// Shorthand for `TypiQLRouter::new(schema, graphql_path).build()` — an app
+/// with users uses `TypiQLRouter` directly, adding `.with_user::<MyUser>()`.
 pub fn typiql_router<Q, M, S>(schema: async_graphql::Schema<Q, M, S>, graphql_path: &str) -> Router
 where
     Q: ObjectType + 'static,
     M: ObjectType + 'static,
     S: SubscriptionType + 'static,
 {
-    let path = graphql_path.to_string();
-    Router::new()
-        .route_service("/graphql", TypiQLGraphQL { executor: schema })
-        .route("/playground", get(move || make_playground(path.clone())))
+    TypiQLRouter::new(schema, graphql_path).build()
+}
+
+/// Builder for the typiql axum router — see [`typiql_router`] for what it
+/// serves.
+///
+/// ```rust,ignore
+/// let typiql = TypiQLRouter::new(schema, "/typiql/graphql")
+///     .with_user::<MyUser>()
+///     .build();
+/// router
+///     .nest("/typiql", typiql)
+///     // The app's own auth (JWT, integrated auth, ...) inserts `MyUser`
+///     // into the request extensions; typiql never authenticates.
+///     .layer(axum::middleware::from_fn(my_auth_middleware))
+/// ```
+pub struct TypiQLRouter<Q, M, S> {
+    schema: async_graphql::Schema<Q, M, S>,
+    graphql_path: String,
+    attach: AttachFn,
+}
+
+impl<Q, M, S> TypiQLRouter<Q, M, S>
+where
+    Q: ObjectType + 'static,
+    M: ObjectType + 'static,
+    S: SubscriptionType + 'static,
+{
+    pub fn new(schema: async_graphql::Schema<Q, M, S>, graphql_path: &str) -> Self {
+        TypiQLRouter {
+            schema,
+            graphql_path: graphql_path.to_string(),
+            attach: attach_nothing,
+        }
+    }
+
+    /// Makes the app's user type `U` available to GraphQL: whenever an
+    /// incoming request's extensions hold a `U` (put there by the app's own
+    /// auth middleware), it's attached to the GraphQL request — as `U` for
+    /// custom resolvers, and as [`crate::CurrentUser`] for generated
+    /// `roles`/`scope`/`set` checks. A request without one runs anonymously.
+    pub fn with_user<U: TypiQLUser>(mut self) -> Self {
+        self.attach = attach_user::<U>;
+        self
+    }
+
+    pub fn build(self) -> Router {
+        let path = self.graphql_path;
+        Router::new()
+            .route_service(
+                "/graphql",
+                TypiQLGraphQL {
+                    executor: self.schema,
+                    attach: self.attach,
+                },
+            )
+            .route("/playground", get(move || make_playground(path.clone())))
+    }
 }

@@ -15,7 +15,7 @@ async-graphql        = { version = "7", features = ["dataloader"] }
 async-graphql-axum   = "7"
 axum                 = "0.8"
 async-trait          = "0.1"
-tokio                = { version = "1", features = ["sync"] }
+tokio                = { version = "1", features = ["sync", "rt"] }
 tokio-stream         = { version = "0.1", features = ["sync"] }
 futures-util         = "0.3"
 serde                = { version = "1", features = ["derive"] }
@@ -24,3 +24,7 @@ tower-http           = { version = "0.6", features = ["cors"] }
 tower                = "0.5"
 http                 = "1"
 bytes                = "1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tower = { version = "0.5", features = ["util"] }

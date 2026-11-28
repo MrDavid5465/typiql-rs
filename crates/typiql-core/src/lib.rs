@@ -1,21 +1,52 @@
 pub mod adapter;
+pub mod auth;
 pub mod broker;
+pub mod join_cache;
+pub mod log;
+pub mod query;
 pub mod relation_loader;
 pub mod resolver;
 pub mod router;
 
-pub use adapter::{FieldFilter, FilterOp, Location, TypiQLAdapter};
+pub use adapter::{query_in_memory, FieldFilter, FilterOp, Location, TypiQLAdapter};
+pub use auth::{check_roles, resolve_value, with_user, CurrentUser, TypiQLUser};
 pub use broker::TypiQLBroker;
-pub use relation_loader::RelationLoader;
-pub use resolver::{
-    resolve_add, resolve_add_many, resolve_list, resolve_remove, resolve_update, AdapterMap,
+pub use join_cache::{JoinCache, JoinCacheExtension};
+pub use log::{
+    enable_logging, log_success, ErrorLogExtension, LogEntry, LogSink, StoreLogger, TypiQLLogger,
 };
-pub use router::typiql_router;
+pub use query::{
+    is_element_filter, list_query, AggregateFn, AggregateSpec, ElementAt, ElementMatch, Join,
+    JoinCondition, JoinValue, ListQuery, Measure, PageInfo, SortKey,
+};
+pub use relation_loader::{RelationCondition, RelationKey, RelationLoader};
+pub use resolver::{
+    matches_scope, resolve_add, resolve_add_many, resolve_add_many_inputs, resolve_add_with,
+    resolve_list, resolve_page_info, resolve_query, resolve_remove, resolve_remove_many,
+    resolve_remove_with, resolve_update, resolve_update_many, resolve_update_with, resolve_upsert,
+    AdapterMap,
+};
+pub use router::{typiql_router, TypiQLRouter};
 
 // Re-export the proc-macros so callers only need `typiql` as a dependency.
-pub use typiql_macros::{typiql_schema, typiql_type};
+pub use typiql_macros::{typiql_log, typiql_schema, typiql_type, TypiQLElement};
 
 use serde::{Deserialize, Serialize};
+
+/// Implemented (via `#[derive(TypiQLElement)]`) by the element type of a
+/// list field a parent filters inside — `#[typiql(elements)] pub
+/// interactions: Vec<Interaction>` gets `interactions_any`, `_first`,
+/// `_last` and `_atIndex` arguments typed by these filters.
+pub trait TypiQLElement {
+    /// `<Name>Filter`: one argument per operator per field, C#'s names.
+    type Filter: async_graphql::InputType;
+    /// `<Name>IndexFilter`: `{ index, filter }`.
+    type IndexFilter: async_graphql::InputType;
+    /// The conditions a filter sets, on the element's own fields.
+    fn element_filters(filter: Self::Filter) -> Vec<FieldFilter>;
+    /// The position and conditions an index filter sets.
+    fn index_filter(filter: Self::IndexFilter) -> (i64, Vec<FieldFilter>);
+}
 
 /// Implement this trait (via `#[typiql_type]`) on any struct you want typiql to manage.
 pub trait TypiQLType: for<'de> Deserialize<'de> + Serialize + Send + Sync + 'static {
@@ -23,7 +54,69 @@ pub trait TypiQLType: for<'de> Deserialize<'de> + Serialize + Send + Sync + 'sta
     type Input: Serialize + for<'de> Deserialize<'de> + Default + Send + Sync;
 
     fn type_name() -> &'static str;
+    /// The key field's storage name (its `data_name`, if it has one).
     fn key_field() -> &'static str;
+
+    /// A key, as adapters pass keys around (text), in the JSON form its
+    /// rows store it in — a number for an integer key.
+    fn key_json(key: &str) -> serde_json::Value {
+        serde_json::Value::String(key.to_string())
+    }
+
+    /// A stand-in key of the key's type, for completing a new row whose key
+    /// the adapter will assign (`""`, or `0` for an integer key).
+    fn key_placeholder() -> serde_json::Value {
+        serde_json::Value::String(String::new())
+    }
+
+    /// A field's storage name, from its Rust/GraphQL name — `data_name` if
+    /// the field declares one, else the name unchanged. Lets code outside
+    /// this type (a relation naming this type's `foreign` field) address the
+    /// adapter the way this type stores its data.
+    fn data_name(field: &'static str) -> &'static str {
+        field
+    }
+
+    /// The storage name of the field a client may sort by under this GraphQL
+    /// name (`_orderBy: "displayName"`), or `None` if there's no such
+    /// sortable field. Generated for every non-relation field, plus dotted
+    /// paths through join-mode relations (`"owner.displayName"` →
+    /// `"owner.DISPLAY_NAME"`).
+    fn sort_field(_graphql_name: &str) -> Option<String> {
+        None
+    }
+
+    /// This type's join-mode relations (relation fields with a
+    /// `data_name`), with any variable condition values resolved for this
+    /// request. Generated; see [`Join`].
+    fn joins(_ctx: &async_graphql::Context<'_>) -> async_graphql::Result<Vec<Join>> {
+        Ok(Vec::new())
+    }
+
+    /// Each generated root operation's GraphQL name and kind (`get`,
+    /// `list`, `add`, ...) — for labelling log entries.
+    fn operations() -> &'static [(&'static str, &'static str)] {
+        &[]
+    }
+
+    /// Whether this is a log type (`#[typiql_log]`): including it in
+    /// `typiql_schema!` turns logging on, stored in it.
+    fn is_log_store() -> bool {
+        false
+    }
+
+    /// The stored procedure serving this type, and its parameters (the key
+    /// fields' storage names, in order) — `#[typiql_type(procedure = "…")]`.
+    fn procedure() -> Option<(&'static str, &'static [&'static str])> {
+        None
+    }
+
+    /// For an aggregate type (`#[typiql_type(aggregate = "Source")]`): what
+    /// it groups and computes over its source. Such a type has no storage
+    /// of its own.
+    fn aggregate() -> Option<AggregateSpec> {
+        None
+    }
     fn collection_name() -> &'static str;
 
     /// Which registered adapter (see `typiql_schema!`'s adapter map) stores
